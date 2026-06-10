@@ -30,6 +30,52 @@ func (s *server) listClaws(ctx context.Context, identity userIdentity, namespace
 	if err := s.kubeJSON(ctx, identity, http.MethodGet, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", namespace, "claws"), nil, &list); err != nil {
 		return nil, err
 	}
+	return clawStatesFromList(list), nil
+}
+
+func (s *server) listAllClaws(ctx context.Context, identity userIdentity) ([]stateResponse, error) {
+	var list map[string]any
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, "/apis/claw.sandbox.redhat.com/v1alpha1/claws", nil, &list); err != nil {
+		var apiErr apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+			return nil, err
+		}
+		return s.listClawsByVisibleNamespaces(ctx, identity)
+	}
+	return clawStatesFromList(list), nil
+}
+
+func (s *server) listClawsByVisibleNamespaces(ctx context.Context, identity userIdentity) ([]stateResponse, error) {
+	var namespaceList map[string]any
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, "/api/v1/namespaces", nil, &namespaceList); err != nil {
+		return nil, err
+	}
+	items, _, _ := nestedSlice(namespaceList, "items")
+	claws := []stateResponse{}
+	for _, item := range items {
+		namespace, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := nestedString(namespace, "metadata", "name")
+		if name == "" {
+			continue
+		}
+		namespaceClaws, err := s.listClaws(ctx, identity, name)
+		if err != nil {
+			var apiErr apiError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		claws = append(claws, namespaceClaws...)
+	}
+	sortClaws(claws)
+	return claws, nil
+}
+
+func clawStatesFromList(list map[string]any) []stateResponse {
 	items, _, _ := nestedSlice(list, "items")
 	claws := make([]stateResponse, 0, len(items))
 	for _, item := range items {
@@ -39,10 +85,17 @@ func (s *server) listClaws(ctx context.Context, identity userIdentity, namespace
 		}
 		claws = append(claws, stateFromClaw(claw))
 	}
+	sortClaws(claws)
+	return claws
+}
+
+func sortClaws(claws []stateResponse) {
 	sort.Slice(claws, func(i, j int) bool {
+		if claws[i].Namespace != claws[j].Namespace {
+			return claws[i].Namespace < claws[j].Namespace
+		}
 		return claws[i].Name < claws[j].Name
 	})
-	return claws, nil
 }
 
 func (s *server) getState(ctx context.Context, identity userIdentity, namespace, name string) (stateResponse, error) {
@@ -66,11 +119,17 @@ func stateFromClaw(claw map[string]any) stateResponse {
 		provider = providers[0]
 	}
 	name, _, _ := nestedString(claw, "metadata", "name")
+	namespace, _, _ := nestedString(claw, "metadata", "namespace")
 	createdAt, _, _ := nestedString(claw, "metadata", "creationTimestamp")
 	model, _, _ := nestedString(claw, "spec", "config", "raw", "agents", "defaults", "model", "primary")
 	agentName := firstAgentName(claw)
+	management, _, _ := nestedString(claw, "spec", "config", "management")
+	if management == "" {
+		management = defaultManagement
+	}
 
 	return stateResponse{
+		Namespace:   namespace,
 		Name:        name,
 		Exists:      true,
 		Ready:       ready,
@@ -81,6 +140,7 @@ func stateFromClaw(claw map[string]any) stateResponse {
 		Providers:   providers,
 		Model:       model,
 		AgentName:   agentName,
+		Management:  management,
 		CreatedAt:   createdAt,
 		SecretNames: credentialSecretNames(claw),
 	}
@@ -134,12 +194,15 @@ func (s *server) ensureProject(ctx context.Context, identity userIdentity, names
 }
 
 func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provisionRequest) error {
+	if req.Management == "" {
+		req.Management = s.defaultConfigManagement()
+	}
 	credentials, rawConfig, err := s.currentClawSpec(ctx, identity, req.Namespace, req.Name)
 	if err != nil {
 		return err
 	}
 	credentials = upsertProvisionCredential(credentials, req)
-	if req.Model != "" {
+	if req.AgentName != "" {
 		rawConfig = applyAgentConfig(rawConfig, req.AgentName, req.Model)
 	}
 
@@ -156,12 +219,20 @@ func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provi
 		"spec": map[string]any{
 			"credentials": credentials,
 			"config": map[string]any{
-				"raw":       rawConfig,
-				"mergeMode": "merge",
+				"raw":        rawConfig,
+				"mergeMode":  "merge",
+				"management": req.Management,
 			},
 		},
 	}
 	return s.apply(ctx, identity, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", req.Namespace, "claws", req.Name), body)
+}
+
+func (s *server) defaultConfigManagement() string {
+	if s.defaultManagement == "" {
+		return defaultManagement
+	}
+	return s.defaultManagement
 }
 
 func (s *server) currentClawSpec(ctx context.Context, identity userIdentity, namespace, name string) ([]any, map[string]any, error) {
@@ -235,16 +306,20 @@ func applyAgentConfig(raw map[string]any, agentName, model string) map[string]an
 	config := cloneMap(raw)
 	agents := ensureMap(config, "agents")
 	defaults := ensureMap(agents, "defaults")
-	defaults["model"] = map[string]any{"primary": model}
-	models := ensureMap(defaults, "models")
-	models[model] = map[string]any{"alias": model}
+	if model != "" {
+		defaults["model"] = map[string]any{"primary": model}
+		models := ensureMap(defaults, "models")
+		models[model] = map[string]any{"alias": model}
+	}
 
 	defaultAgent := map[string]any{
 		"id":        "default",
 		"name":      agentName,
 		"identity":  map[string]string{"name": agentName},
 		"workspace": "~/.openclaw/workspace",
-		"model":     map[string]any{"primary": model},
+	}
+	if model != "" {
+		defaultAgent["model"] = map[string]any{"primary": model}
 	}
 	existing, _ := agents["list"].([]any)
 	list := append([]any(nil), existing...)

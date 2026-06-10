@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -26,7 +25,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -64,68 +62,24 @@ func kubeHTTPClient() (*http.Client, error) {
 	}, nil
 }
 
-func kubeBearerToken() (string, bool, error) {
+func kubeBearerToken() (string, error) {
 	if token := strings.TrimSpace(os.Getenv("DEVELOPER_BEARER_TOKEN")); token != "" {
-		return token, strings.EqualFold(os.Getenv("OPENCLAW_DEPLOYER_IMPERSONATE"), "true"), nil
+		return token, nil
 	}
 	token, err := os.ReadFile(inClusterTokenPath)
 	if err != nil {
-		return "", false, fmt.Errorf("read Kubernetes service account token: %w", err)
+		return "", fmt.Errorf("read Kubernetes service account token: %w", err)
 	}
-	return strings.TrimSpace(string(token)), true, nil
+	return strings.TrimSpace(string(token)), nil
 }
 
-func (s *server) apply(ctx context.Context, identity userIdentity, path string, body any) error {
-	return s.kubeJSON(ctx, identity, http.MethodPatch, path+"?fieldManager="+url.QueryEscape(fieldManager)+"&force=true", body, nil)
-}
-
-func (s *server) mergePatch(ctx context.Context, identity userIdentity, path string, body any) error {
-	return s.kubeJSONWithContentType(ctx, identity, http.MethodPatch, path, body, nil, "application/merge-patch+json")
-}
-
-func (s *server) delete(ctx context.Context, identity userIdentity, path string) error {
-	err := s.kubeJSON(ctx, identity, http.MethodDelete, path, nil, nil)
-	var apiErr apiError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-		return nil
-	}
-	return err
-}
-
-func (s *server) kubeJSON(ctx context.Context, identity userIdentity, method, requestPath string, body any, out any) error {
-	contentType := ""
-	if method == http.MethodPatch {
-		contentType = "application/apply-patch+yaml"
-	} else if body != nil {
-		contentType = "application/json"
-	}
-	return s.kubeJSONWithContentType(ctx, identity, method, requestPath, body, out, contentType)
-}
-
-func (s *server) kubeJSONWithContentType(ctx context.Context, identity userIdentity, method, requestPath string, body any, out any, contentType string) error {
-	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, s.apiServer+requestPath, reader)
+func (s *server) kubeJSON(ctx context.Context, method, requestPath string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, s.apiServer+requestPath, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.bearerToken)
 	req.Header.Set("Accept", "application/json")
-	if s.impersonate {
-		req.Header.Set("Impersonate-User", identity.Name)
-		for _, group := range identity.Groups {
-			req.Header.Add("Impersonate-Group", group)
-		}
-	}
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -158,7 +112,6 @@ func (e apiError) Error() string {
 func parseAPIError(statusCode int, body []byte) error {
 	var status struct {
 		Message string `json:"message"`
-		Reason  string `json:"reason"`
 	}
 	if err := json.Unmarshal(body, &status); err == nil && status.Message != "" {
 		return apiError{StatusCode: statusCode, Message: status.Message}

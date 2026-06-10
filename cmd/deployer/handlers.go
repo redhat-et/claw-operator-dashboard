@@ -31,9 +31,10 @@ func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, meResponse{
-		User:             user,
-		DefaultNamespace: allowedNamespaceForUser(user, s.namespaceSuffix),
-		Providers:        []string{"openrouter", "openai", "google", "google-vertex", "anthropic", "anthropic-vertex", "xai"},
+		User:              user,
+		DefaultNamespace:  allowedNamespaceForUser(user, s.namespaceSuffix),
+		DefaultManagement: s.defaultConfigManagement(),
+		Providers:         []string{"openrouter", "openai", "google", "google-vertex", "anthropic", "anthropic-vertex", "xai"},
 	})
 }
 
@@ -57,10 +58,6 @@ func (s *server) handleState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.authorizeNamespace(identity.Name, namespace); err != nil {
-		writeError(w, statusCodeFor(err), err.Error())
-		return
-	}
 
 	name := r.URL.Query().Get("name")
 	if name == "" {
@@ -75,7 +72,7 @@ func (s *server) handleState(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var apiErr apiError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			writeJSON(w, http.StatusOK, stateResponse{Name: name, Exists: false})
+			writeJSON(w, http.StatusOK, stateResponse{Namespace: namespace, Name: name, Exists: false})
 			return
 		}
 		writeError(w, statusCodeFor(err), err.Error())
@@ -92,23 +89,25 @@ func (s *server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	namespace := r.URL.Query().Get("namespace")
-	if err := validateNamespace(namespace); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.authorizeNamespace(identity.Name, namespace); err != nil {
-		writeError(w, statusCodeFor(err), err.Error())
-		return
-	}
 
-	claws, err := s.listClaws(r.Context(), identity, namespace)
-	if err != nil {
+	var claws []stateResponse
+	var listErr error
+	if namespace == "" {
+		claws, listErr = s.listAllClaws(r.Context(), identity)
+	} else {
+		if err := validateNamespace(namespace); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		claws, listErr = s.listClaws(r.Context(), identity, namespace)
+	}
+	if listErr != nil {
 		var apiErr apiError
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusForbidden) {
+		if errors.As(listErr, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || (namespace != "" && apiErr.StatusCode == http.StatusForbidden)) {
 			writeJSON(w, http.StatusOK, listResponse{Claws: []stateResponse{}})
 			return
 		}
-		writeError(w, statusCodeFor(err), err.Error())
+		writeError(w, statusCodeFor(listErr), listErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, listResponse{Claws: claws})
@@ -135,6 +134,15 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		req.Model = normalizeModelRef(req.Provider, req.Model)
 	}
+	if strings.TrimSpace(req.Management) == "" {
+		req.Management = s.defaultConfigManagement()
+	} else {
+		req.Management, err = normalizeConfigManagement(req.Management)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	req.Namespace = strings.TrimSpace(req.Namespace)
 	req.GCPProject = strings.TrimSpace(req.GCPProject)
 	req.GCPLocation = strings.TrimSpace(req.GCPLocation)
@@ -147,10 +155,6 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AgentName = agentNameFromClawName(req.Name)
-	if err := s.authorizeNamespace(identity.Name, req.Namespace); err != nil {
-		writeError(w, statusCodeFor(err), err.Error())
-		return
-	}
 	if _, ok := providers[req.Provider]; !ok {
 		writeError(w, http.StatusBadRequest, "unsupported provider")
 		return
@@ -206,10 +210,6 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.authorizeNamespace(identity.Name, namespace); err != nil {
-		writeError(w, statusCodeFor(err), err.Error())
-		return
-	}
 	name := r.URL.Query().Get("name")
 	if err := validateResourceName(name, "Claw name"); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -237,10 +237,6 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	if err := validateNamespace(namespace); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.authorizeNamespace(identity.Name, namespace); err != nil {
-		writeError(w, statusCodeFor(err), err.Error())
 		return
 	}
 	name := r.URL.Query().Get("name")

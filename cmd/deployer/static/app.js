@@ -1,3 +1,6 @@
+const storedManagement = localStorage.getItem("openclaw-deployer.management");
+const hasStoredManagement = ["operator", "user"].includes(storedManagement);
+
 const state = {
   namespace: localStorage.getItem("openclaw-deployer.namespace") || "",
   provider: localStorage.getItem("openclaw-deployer.provider") || "openrouter",
@@ -5,6 +8,7 @@ const state = {
   model: localStorage.getItem("openclaw-deployer.model") || "",
   gcpProject: localStorage.getItem("openclaw-deployer.gcpProject") || "",
   gcpLocation: localStorage.getItem("openclaw-deployer.gcpLocation") || "",
+  management: hasStoredManagement ? storedManagement : "operator",
   claws: [],
   exists: false,
   ready: false,
@@ -46,10 +50,12 @@ const els = {
   card: document.getElementById("card"),
   user: document.getElementById("user"),
   namespace: document.getElementById("namespace"),
+  namespaceOptions: document.getElementById("namespace-options"),
   clawName: document.getElementById("clawName"),
   provider: document.getElementById("provider"),
   model: document.getElementById("model"),
   modelOptions: document.getElementById("model-options"),
+  managementOptions: document.querySelectorAll('input[name="management"]'),
   gcpProjectRow: document.getElementById("gcp-project-row"),
   gcpLocationRow: document.getElementById("gcp-location-row"),
   gcpProject: document.getElementById("gcpProject"),
@@ -59,6 +65,8 @@ const els = {
   gcpCredentials: document.getElementById("gcpCredentials"),
   status: document.getElementById("status"),
   running: document.getElementById("running"),
+  runningCount: document.getElementById("running-count"),
+  runningEmpty: document.getElementById("running-empty"),
   clawList: document.getElementById("claw-list"),
   provision: document.getElementById("provision"),
   restart: document.getElementById("restart"),
@@ -71,6 +79,7 @@ els.provider.value = state.provider;
 els.model.value = state.model;
 els.gcpProject.value = state.gcpProject;
 els.gcpLocation.value = state.gcpLocation || defaultGCPLocations[state.provider] || "";
+setManagement(state.management || "operator");
 renderModelOptions();
 renderCredentialFields();
 
@@ -89,7 +98,7 @@ async function api(path, options = {}) {
 async function init() {
   try {
     const me = await api("/api/me");
-    if (me.defaultNamespace) {
+    if (me.defaultNamespace && !state.namespace) {
       state.namespace = me.defaultNamespace;
       els.namespace.value = state.namespace;
       localStorage.setItem("openclaw-deployer.namespace", state.namespace);
@@ -97,7 +106,9 @@ async function init() {
     if (me.user) {
       els.user.textContent = me.user;
     }
-    els.namespace.readOnly = true;
+    if (!hasStoredManagement) {
+      setManagement(me.defaultManagement || "operator");
+    }
   } catch (error) {
     setStatus(error.message, true);
     setBusy(false);
@@ -113,32 +124,39 @@ async function refresh() {
   state.model = els.model.value.trim();
   state.gcpProject = els.gcpProject.value.trim();
   state.gcpLocation = els.gcpLocation.value.trim();
+  state.management = selectedManagement();
   localStorage.setItem("openclaw-deployer.namespace", state.namespace);
   localStorage.setItem("openclaw-deployer.name", state.selectedName);
   localStorage.setItem("openclaw-deployer.provider", state.provider);
   localStorage.setItem("openclaw-deployer.model", state.model);
   localStorage.setItem("openclaw-deployer.gcpProject", state.gcpProject);
   localStorage.setItem("openclaw-deployer.gcpLocation", state.gcpLocation);
-
-  if (!state.namespace) {
-    setStatus("Choose the namespace where your OpenClaw should run.");
-    renderList([]);
-    return;
-  }
+  localStorage.setItem("openclaw-deployer.management", state.management);
 
   setStatus("Checking status...");
   try {
-    const current = await api(`/api/claws?namespace=${encodeURIComponent(state.namespace)}`);
+    const current = await api("/api/claws");
     renderList(current.claws || []);
   } catch (error) {
-    renderList([]);
-    setStatus(error.message, true);
+    if (!state.namespace) {
+      renderList([]);
+      setStatus(error.message, true);
+      return;
+    }
+    try {
+      const current = await api(`/api/claws?namespace=${encodeURIComponent(state.namespace)}`);
+      renderList(current.claws || []);
+    } catch (namespaceError) {
+      renderList([]);
+      setStatus(namespaceError.message, true);
+    }
   }
 }
 
 function renderList(claws) {
   state.claws = claws;
-  const selected = claws.find((claw) => claw.name === state.selectedName) || null;
+  renderNamespaceOptions(claws);
+  const selected = claws.find((claw) => (claw.namespace || state.namespace) === state.namespace && claw.name === state.selectedName) || null;
   state.exists = Boolean(selected);
   state.ready = Boolean(selected && selected.ready);
   if (selected) {
@@ -146,6 +164,9 @@ function renderList(claws) {
       els.model.value = selected.model;
       state.model = selected.model;
       localStorage.setItem("openclaw-deployer.model", selected.model);
+    }
+    if (selected.management) {
+      setManagement(selected.management);
     }
   }
 
@@ -155,8 +176,12 @@ function renderList(claws) {
   els.provision.textContent = state.exists ? "Add/update provider" : "Create";
   renderClaws(claws);
 
+  if (!state.namespace) {
+    setStatus("Choose the namespace where your OpenClaw should run.");
+    return;
+  }
   if (!state.exists) {
-    setStatus("No OpenClaw is running in your namespace.");
+    setStatus(`No OpenClaw named ${state.selectedName} is running in project ${state.namespace}.`);
     return;
   }
   if (selected.ready) {
@@ -168,31 +193,69 @@ function renderList(claws) {
   setStatus(selected.message || selected.reason || `${selected.name} is provisioning.`);
 }
 
+function renderNamespaceOptions(claws) {
+  const namespaces = [...new Set(claws.map((claw) => claw.namespace).filter(Boolean))].sort();
+  els.namespaceOptions.innerHTML = "";
+  for (const namespace of namespaces) {
+    const option = document.createElement("option");
+    option.value = namespace;
+    els.namespaceOptions.appendChild(option);
+  }
+}
+
 function renderClaws(claws) {
-  els.running.hidden = claws.length === 0;
+  els.runningCount.textContent = String(claws.length);
+  els.runningEmpty.hidden = claws.length !== 0;
   els.clawList.innerHTML = "";
   for (const claw of claws) {
+    const namespace = claw.namespace || state.namespace;
     const row = document.createElement("div");
-    row.className = `claw-row${claw.name === state.selectedName ? " selected" : ""}`;
+    row.className = `claw-row${namespace === state.namespace && claw.name === state.selectedName ? " selected" : ""}`;
     const details = document.createElement("button");
     details.type = "button";
     details.className = "claw-pick";
-    details.textContent = `${claw.name} · ${claw.ready ? "Ready" : claw.reason || "Provisioning"}`;
+    details.textContent = `${namespace}/${claw.name} · ${claw.ready ? "Ready" : claw.reason || "Provisioning"}`;
     details.addEventListener("click", () => {
+      state.namespace = namespace;
       state.selectedName = claw.name;
+      els.namespace.value = namespace;
       els.clawName.value = claw.name;
+      localStorage.setItem("openclaw-deployer.namespace", namespace);
       localStorage.setItem("openclaw-deployer.name", claw.name);
       renderList(state.claws);
     });
     row.appendChild(details);
+    const actions = document.createElement("div");
+    actions.className = "claw-row-actions";
     if (claw.gatewayURL) {
       const link = document.createElement("a");
       link.href = claw.gatewayURL;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.textContent = "Open Control UI";
-      row.appendChild(link);
+      actions.appendChild(link);
     }
+    const restart = document.createElement("button");
+    restart.type = "button";
+    restart.className = "secondary compact claw-action";
+    restart.textContent = "Restart";
+    restart.addEventListener("click", (event) => {
+      event.stopPropagation();
+      restartClaw(namespace, claw.name);
+    });
+    actions.appendChild(restart);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger compact claw-action";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteClaw(namespace, claw.name);
+    });
+    actions.appendChild(remove);
+
+    row.appendChild(actions);
     els.clawList.appendChild(row);
   }
 }
@@ -227,6 +290,21 @@ function setBusy(busy) {
   for (const button of [els.provision, els.restart, els.delete]) {
     button.disabled = busy || (button === els.restart && !state.exists) || (button === els.delete && !state.exists);
   }
+  for (const button of document.querySelectorAll(".claw-action")) {
+    button.disabled = busy;
+  }
+}
+
+function selectedManagement() {
+  return document.querySelector('input[name="management"]:checked')?.value || "operator";
+}
+
+function setManagement(value) {
+  state.management = value === "user" ? "user" : "operator";
+  for (const option of els.managementOptions) {
+    option.checked = option.value === state.management;
+  }
+  localStorage.setItem("openclaw-deployer.management", state.management);
 }
 
 els.provision.addEventListener("click", async () => {
@@ -238,6 +316,7 @@ els.provision.addEventListener("click", async () => {
   const apiKey = (isGoogleVertex ? els.gcpCredentials.value : els.apiKey.value).trim();
   const gcpProject = els.gcpProject.value.trim();
   const gcpLocation = els.gcpLocation.value.trim();
+  const management = selectedManagement();
 
   if (!namespace || !name || !apiKey) {
     setStatus(`Namespace, OpenClaw name, and ${isGoogleVertex ? "service account JSON" : "API key"} are required.`, true);
@@ -257,7 +336,7 @@ els.provision.addEventListener("click", async () => {
   try {
     const current = await api("/api/provision", {
       method: "POST",
-      body: JSON.stringify({ namespace, name, provider, model, apiKey, gcpProject, gcpLocation }),
+      body: JSON.stringify({ namespace, name, provider, model, apiKey, gcpProject, gcpLocation, management }),
     });
     els.apiKey.value = "";
     els.gcpCredentials.value = "";
@@ -272,36 +351,44 @@ els.provision.addEventListener("click", async () => {
 });
 
 els.restart.addEventListener("click", async () => {
-  if (!state.exists || !confirm("Restart this OpenClaw instance?")) {
-    return;
-  }
-  setBusy(true);
-  setStatus("Restarting OpenClaw...");
-  try {
-    await api(`/api/restart?namespace=${encodeURIComponent(els.namespace.value.trim())}&name=${encodeURIComponent(els.clawName.value.trim())}`, { method: "POST" });
-    await refresh();
-  } catch (error) {
-    setStatus(error.message, true);
-  } finally {
-    setBusy(false);
-  }
+  await restartClaw(els.namespace.value.trim(), els.clawName.value.trim());
 });
 
 els.delete.addEventListener("click", async () => {
-  if (!state.exists || !confirm("Delete this OpenClaw instance?")) {
+  await deleteClaw(els.namespace.value.trim(), els.clawName.value.trim());
+});
+
+async function restartClaw(namespace, name) {
+  if (!namespace || !name || !confirm(`Restart ${namespace}/${name}?`)) {
     return;
   }
   setBusy(true);
-  setStatus("Deleting OpenClaw...");
+  setStatus(`Restarting ${namespace}/${name}...`);
   try {
-    await api(`/api/claw?namespace=${encodeURIComponent(els.namespace.value.trim())}&name=${encodeURIComponent(els.clawName.value.trim())}`, { method: "DELETE" });
+    await api(`/api/restart?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`, { method: "POST" });
     await refresh();
   } catch (error) {
     setStatus(error.message, true);
   } finally {
     setBusy(false);
   }
-});
+}
+
+async function deleteClaw(namespace, name) {
+  if (!namespace || !name || !confirm(`Delete ${namespace}/${name}?`)) {
+    return;
+  }
+  setBusy(true);
+  setStatus(`Deleting ${namespace}/${name}...`);
+  try {
+    await api(`/api/claw?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`, { method: "DELETE" });
+    await refresh();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+}
 
 els.namespace.addEventListener("change", refresh);
 els.clawName.addEventListener("change", refresh);
@@ -324,6 +411,13 @@ els.model.addEventListener("change", () => {
   state.model = els.model.value.trim();
   localStorage.setItem("openclaw-deployer.model", state.model);
 });
+for (const option of els.managementOptions) {
+  option.addEventListener("change", () => {
+    if (option.checked) {
+      setManagement(option.value);
+    }
+  });
+}
 
 function isSupportedGCPKey(value) {
   try {
@@ -336,7 +430,7 @@ function isSupportedGCPKey(value) {
 
 init();
 setInterval(() => {
-  if (state.namespace && state.claws.some((claw) => !claw.ready)) {
+  if (state.claws.some((claw) => !claw.ready)) {
     refresh();
   }
 }, 10000);

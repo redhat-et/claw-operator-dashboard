@@ -195,6 +195,17 @@ func validateGCPServiceAccountJSON(value string) error {
 	return nil
 }
 
+func normalizeConfigManagement(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return defaultManagement, nil
+	}
+	if value != "operator" && value != "user" {
+		return "", errors.New(`config management must be "operator" or "user"`)
+	}
+	return value, nil
+}
+
 func normalizeModelRef(provider, model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {

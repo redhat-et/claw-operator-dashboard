@@ -254,6 +254,41 @@ func TestHandleDeleteRemovesAllManagedProviderSecrets(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteUsesRequestedNamespace(t *testing.T) {
+	deleted := map[string]bool{}
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body := "{}"
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/unmanaged") {
+				body = `{"metadata": {"namespace": "somalley-unmanaged-openclaw-test", "name": "unmanaged"}}`
+			}
+			if r.Method == http.MethodDelete {
+				deleted[r.URL.Path] = true
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+
+	s := &server{
+		apiServer:       "https://kubernetes.example.test",
+		bearerToken:     "service-account-token",
+		namespaceSuffix: defaultNSSuffix,
+		client:          client,
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/claw?namespace=somalley-unmanaged-openclaw-test&name=unmanaged", nil)
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleDelete(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, deleted["/apis/claw.sandbox.redhat.com/v1alpha1/namespaces/somalley-unmanaged-openclaw-test/claws/unmanaged"])
+}
+
 func TestHandleDeleteCleansManagedSecretsWhenStateReadFails(t *testing.T) {
 	deleted := map[string]bool{}
 	client := &http.Client{
@@ -304,6 +339,45 @@ func TestHandleDeleteCleansManagedSecretsWhenStateReadFails(t *testing.T) {
 	}
 }
 
+func TestHandleClawsListsAllVisibleNamespaces(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "/apis/claw.sandbox.redhat.com/v1alpha1/claws", r.URL.Path)
+			body := `{
+				"items": [
+					{"metadata": {"namespace": "sallyom-claw", "name": "shifty"}},
+					{"metadata": {"namespace": "somalley-unmanaged-openclaw-test", "name": "unmanaged"}}
+				]
+			}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	s := &server{
+		apiServer:   "https://kubernetes.example.test",
+		bearerToken: "service-account-token",
+		client:      client,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleClaws(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var payload listResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Len(t, payload.Claws, 2)
+	assert.Equal(t, "sallyom-claw", payload.Claws[0].Namespace)
+	assert.Equal(t, "shifty", payload.Claws[0].Name)
+	assert.Equal(t, "somalley-unmanaged-openclaw-test", payload.Claws[1].Namespace)
+	assert.Equal(t, "unmanaged", payload.Claws[1].Name)
+}
+
 func TestNormalizeModelRef(t *testing.T) {
 	tests := map[string]struct {
 		provider string
@@ -325,7 +399,7 @@ func TestNormalizeModelRef(t *testing.T) {
 	}
 }
 
-func TestApplyClawWithoutModelLeavesAgentConfigUnset(t *testing.T) {
+func TestApplyClawWithoutModelSetsAgentNameOnly(t *testing.T) {
 	var applied map[string]any
 	client := &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -359,7 +433,60 @@ func TestApplyClawWithoutModelLeavesAgentConfigUnset(t *testing.T) {
 
 	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
 	raw, _, _ := nestedMap(applied, "spec", "config", "raw")
-	assert.Empty(t, raw)
+	agents, _, _ := nestedSlice(raw, "agents", "list")
+	require.Len(t, agents, 1)
+	defaultAgent := agents[0].(map[string]any)
+	assert.Equal(t, "Instance", defaultAgent["name"])
+	_, hasModel, _ := nestedValue(raw, "agents", "defaults", "model")
+	assert.False(t, hasModel, "blank model should not force a model config")
+	management, _, _ := nestedString(applied, "spec", "config", "management")
+	assert.Equal(t, "operator", management)
+}
+
+func TestApplyClawSetsUserConfigManagement(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+				}, nil
+			}
+			require.Equal(t, http.MethodPatch, r.Method)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{
+		apiServer:         "https://kubernetes.example.test",
+		bearerToken:       "service-account-token",
+		defaultManagement: "user",
+		client:            client,
+	}
+	req := provisionRequest{
+		Namespace: "sallyom-claw",
+		Name:      "instance",
+		Provider:  "google",
+	}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	management, _, _ := nestedString(applied, "spec", "config", "management")
+	assert.Equal(t, "user", management)
+}
+
+func TestStateFromClawDefaultsConfigManagementToOperator(t *testing.T) {
+	state := stateFromClaw(map[string]any{
+		"metadata": map[string]any{"name": "instance"},
+		"spec":     map[string]any{"config": map[string]any{}},
+	})
+
+	assert.Equal(t, "operator", state.Management)
 }
 
 func TestProviderCredentialForVertex(t *testing.T) {
@@ -399,6 +526,31 @@ func TestValidateGCPServiceAccountJSON(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestNormalizeConfigManagement(t *testing.T) {
+	tests := map[string]struct {
+		value   string
+		want    string
+		wantErr bool
+	}{
+		"default":  {want: "operator"},
+		"operator": {value: "operator", want: "operator"},
+		"user":     {value: "user", want: "user"},
+		"trim":     {value: " User ", want: "user"},
+		"invalid":  {value: "other", wantErr: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := normalizeConfigManagement(tt.value)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

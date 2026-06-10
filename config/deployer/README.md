@@ -1,7 +1,7 @@
 # OpenClaw Deployer
 
-This is a small OpenShift webapp for provisioning `Claw` resources in the
-logged-in user's own OpenClaw namespace.
+This is a small OpenShift webapp for provisioning `Claw` resources in
+OpenShift namespaces the logged-in user can manage.
 
 OpenShift OAuth protects the UI and forwards the username/groups to the
 backend. The backend uses the deployer service account token with Kubernetes
@@ -9,7 +9,7 @@ impersonation headers, so OpenShift authorizes each request as the logged-in
 user. The deployer can only operate where that user already has normal project
 RBAC.
 
-For each Claw, the deployer creates or deletes, only in that user's namespace:
+For each Claw, the deployer creates or deletes in the selected namespace:
 
 - a provider API key Secret named `openclaw-<name>-<provider>-api-key`
 - a `claw.sandbox.redhat.com/v1alpha1` `Claw`
@@ -67,6 +67,13 @@ still need normal RBAC in the target namespace. If they can create Secrets and
 `Claw` resources there, the card can provision their OpenClaw. If they cannot,
 the app shows the Kubernetes authorization error.
 
-By default, the deployer maps user `sallyom` to namespace `sallyom-claw`.
-Users whose login already ends with `-claw` map to that exact namespace. Set
-`CLAW_NAMESPACE_SUFFIX` on the deployer container to use a different suffix.
+By default, the deployer suggests namespace `sallyom-claw` for user `sallyom`.
+Users whose login already ends with `-claw` get that exact namespace as the
+suggestion. Set `CLAW_NAMESPACE_SUFFIX` on the deployer container to use a
+different suffix. The UI keeps the field editable and suggests namespaces from
+Claws the user can see.
+
+The deployer binary defaults new Claws to `spec.config.management=operator`.
+These manifests set `CLAW_CONFIG_MANAGEMENT_DEFAULT=user` so this dashboard
+deployment defaults to user-managed config while still showing an Operator/User
+toggle in the form.
