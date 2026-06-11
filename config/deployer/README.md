@@ -13,6 +13,36 @@ For each Claw, the deployer creates or deletes in the selected namespace:
 
 - a provider API key Secret named `openclaw-<name>-<provider>-api-key`
 - a `claw.sandbox.redhat.com/v1alpha1` `Claw`
+- when a folder is uploaded to seed the filesystem, a ConfigMap named
+  `openclaw-<name>-agentfiles` holding the packaged `agentfiles.tgz`
+
+## Seeding the OpenClaw workspace
+
+When **Config owner** is set to **User**, the form offers an **OpenClaw
+workspace source** that maps to `spec.agentFiles` on the Claw (the operator only
+honors it for user-managed Claws):
+
+- **Git repository** — a repository URL with an optional ref and subpath. The
+  operator clones it in the init container.
+- **Upload a folder** — pick a folder in the browser. The backend packages it
+  into `agentfiles.tgz`, stores it in the `openclaw-<name>-agentfiles`
+  ConfigMap as the impersonated user, and points `spec.agentFiles.configMapRef`
+  at it — no manual `tar`/ConfigMap step. Uploads are capped at 1 MiB.
+
+Either way, the source is a directory tree that seeds the Claw's OpenClaw home
+(`~/.openclaw`, on its persistent volume), applied once on first boot; edits
+made later inside the running Claw are preserved. Layout:
+
+- `workspace-main/` → the agent workspace (`~/.openclaw/workspace/`), e.g.
+  `AGENTS.md`, `SOUL.md`, `memory/`, `skills/`
+- `openclaw.json` → merged into the Claw's effective config (not copied as a
+  workspace file)
+- any other top-level folder → copied under `~/.openclaw/` (e.g. `skills/` →
+  `~/.openclaw/skills/`)
+
+A correct bundle also wires up sub-agent workspaces, shared skills dirs, plugin
+paths, and cron in its `openclaw.json`. See the full layout reference and
+examples in [redhat-et/claw-collections](https://github.com/redhat-et/claw-collections).
 
 ## Build
 

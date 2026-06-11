@@ -25,6 +25,13 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
           readinessProbe:
             httpGet:
               path: /healthz
@@ -58,6 +65,13 @@ spec:
           ports:
             - name: oauth
               containerPort: 4180
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
           volumeMounts:
             - name: cookie-secret
               mountPath: /etc/proxy/secrets

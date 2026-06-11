@@ -307,6 +307,47 @@ textarea.credential-json {
   -webkit-text-security: disc;
 }
 
+.field-group {
+  display: grid;
+  gap: 6px;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.field-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.field-note summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.field-note p {
+  margin: 6px 0 0;
+}
+
+.field-note ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+
+.field-note li {
+  margin: 3px 0;
+}
+
+.field-note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
 input:focus,
 select:focus,
 textarea:focus {

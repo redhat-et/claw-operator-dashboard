@@ -9,7 +9,12 @@ const state = {
   gcpProject: localStorage.getItem("openclaw-deployer.gcpProject") || "",
   gcpLocation: localStorage.getItem("openclaw-deployer.gcpLocation") || "",
   management: hasStoredManagement ? storedManagement : "operator",
+  filesystemSource: localStorage.getItem("openclaw-deployer.filesystemSource") || "",
+  gitURL: localStorage.getItem("openclaw-deployer.gitURL") || "",
+  gitRef: localStorage.getItem("openclaw-deployer.gitRef") || "",
+  gitPath: localStorage.getItem("openclaw-deployer.gitPath") || "",
   claws: [],
+  namespaceSuggestions: [],
   exists: false,
   ready: false,
 };
@@ -63,6 +68,18 @@ const els = {
   credentialLabel: document.getElementById("credential-label"),
   apiKey: document.getElementById("apiKey"),
   gcpCredentials: document.getElementById("gcpCredentials"),
+  filesystemSourceGroup: document.getElementById("filesystem-source-group"),
+  filesystemSource: document.getElementById("filesystemSource"),
+  filesystemSourceHint: document.getElementById("filesystem-source-hint"),
+  workspaceSourceHelp: document.getElementById("workspace-source-help"),
+  gitUrlRow: document.getElementById("git-url-row"),
+  gitRefRow: document.getElementById("git-ref-row"),
+  gitPathRow: document.getElementById("git-path-row"),
+  gitURL: document.getElementById("gitURL"),
+  gitRef: document.getElementById("gitRef"),
+  gitPath: document.getElementById("gitPath"),
+  uploadRow: document.getElementById("upload-row"),
+  agentFiles: document.getElementById("agentFiles"),
   status: document.getElementById("status"),
   running: document.getElementById("running"),
   runningCount: document.getElementById("running-count"),
@@ -79,9 +96,14 @@ els.provider.value = state.provider;
 els.model.value = state.model;
 els.gcpProject.value = state.gcpProject;
 els.gcpLocation.value = state.gcpLocation || defaultGCPLocations[state.provider] || "";
+els.filesystemSource.value = state.filesystemSource;
+els.gitURL.value = state.gitURL;
+els.gitRef.value = state.gitRef;
+els.gitPath.value = state.gitPath;
 setManagement(state.management || "operator");
 renderModelOptions();
 renderCredentialFields();
+renderFilesystemSource();
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -114,7 +136,20 @@ async function init() {
     setBusy(false);
     return;
   }
+  await loadNamespaceSuggestions();
   await refresh();
+}
+
+// One-time cluster-wide read so the namespace field can suggest every namespace
+// the user can see, without making each refresh list Claws cluster-wide.
+async function loadNamespaceSuggestions() {
+  try {
+    const all = await api("/api/claws");
+    state.namespaceSuggestions = [...new Set((all.claws || []).map((claw) => claw.namespace).filter(Boolean))].sort();
+    renderNamespaceOptions([]);
+  } catch {
+    // Best effort: the namespace field stays editable without suggestions.
+  }
 }
 
 async function refresh() {
@@ -134,8 +169,13 @@ async function refresh() {
   localStorage.setItem("openclaw-deployer.management", state.management);
 
   setStatus("Checking status...");
+  // Prefer a namespace-scoped read so polling does not list Claws cluster-wide
+  // on every refresh; fall back to the cluster-wide list only if needed.
   try {
-    const current = await api("/api/claws");
+    const path = state.namespace
+      ? `/api/claws?namespace=${encodeURIComponent(state.namespace)}`
+      : "/api/claws";
+    const current = await api(path);
     renderList(current.claws || []);
   } catch (error) {
     if (!state.namespace) {
@@ -144,11 +184,11 @@ async function refresh() {
       return;
     }
     try {
-      const current = await api(`/api/claws?namespace=${encodeURIComponent(state.namespace)}`);
+      const current = await api("/api/claws");
       renderList(current.claws || []);
-    } catch (namespaceError) {
+    } catch (clusterError) {
       renderList([]);
-      setStatus(namespaceError.message, true);
+      setStatus(clusterError.message, true);
     }
   }
 }
@@ -156,7 +196,21 @@ async function refresh() {
 function renderList(claws) {
   state.claws = claws;
   renderNamespaceOptions(claws);
-  const selected = claws.find((claw) => (claw.namespace || state.namespace) === state.namespace && claw.name === state.selectedName) || null;
+  const inNamespace = state.namespace
+    ? claws.filter((claw) => (claw.namespace || state.namespace) === state.namespace)
+    : claws;
+  let selected = null;
+  if (state.namespace) {
+    selected = inNamespace.find((claw) => claw.name === state.selectedName) || null;
+    if (!selected && inNamespace.length > 0) {
+      // The selected name isn't running here; surface the first Claw in the
+      // namespace so switching namespaces lands on a real instance.
+      selected = inNamespace[0];
+      state.selectedName = selected.name;
+      els.clawName.value = selected.name;
+      localStorage.setItem("openclaw-deployer.name", selected.name);
+    }
+  }
   state.exists = Boolean(selected);
   state.ready = Boolean(selected && selected.ready);
   if (selected) {
@@ -174,7 +228,7 @@ function renderList(claws) {
   els.restart.disabled = !state.exists;
   els.delete.disabled = !state.exists;
   els.provision.textContent = state.exists ? "Add/update provider" : "Create";
-  renderClaws(claws);
+  renderClaws(inNamespace);
 
   if (!state.namespace) {
     setStatus("Choose the namespace where your OpenClaw should run.");
@@ -194,7 +248,9 @@ function renderList(claws) {
 }
 
 function renderNamespaceOptions(claws) {
-  const namespaces = [...new Set(claws.map((claw) => claw.namespace).filter(Boolean))].sort();
+  const namespaces = [
+    ...new Set([...state.namespaceSuggestions, ...claws.map((claw) => claw.namespace).filter(Boolean)]),
+  ].sort();
   els.namespaceOptions.innerHTML = "";
   for (const namespace of namespaces) {
     const option = document.createElement("option");
@@ -227,7 +283,7 @@ function renderClaws(claws) {
     row.appendChild(details);
     const actions = document.createElement("div");
     actions.className = "claw-row-actions";
-    if (claw.gatewayURL) {
+    if (isSafeHref(claw.gatewayURL)) {
       const link = document.createElement("a");
       link.href = claw.gatewayURL;
       link.target = "_blank";
@@ -281,6 +337,22 @@ function renderCredentialFields() {
   }
 }
 
+function renderFilesystemSource() {
+  const source = els.filesystemSource.value;
+  const isUserManaged = selectedManagement() === "user";
+  const isGit = source === "git";
+  const isUpload = source === "upload";
+  els.gitUrlRow.hidden = !isGit;
+  els.gitRefRow.hidden = !isGit;
+  els.gitPathRow.hidden = !isGit;
+  els.uploadRow.hidden = !isUpload;
+  els.workspaceSourceHelp.hidden = !(isUserManaged && source !== "");
+  els.filesystemSource.disabled = !isUserManaged;
+  els.filesystemSourceHint.textContent = isUserManaged
+    ? "Seeds the OpenClaw workspace on first boot from a Git repository or an uploaded folder."
+    : "Switch Config owner to User to seed the workspace from Git or an uploaded folder.";
+}
+
 function setStatus(message, isError = false) {
   els.status.textContent = message;
   els.status.style.color = isError ? "#b42318" : "";
@@ -305,6 +377,9 @@ function setManagement(value) {
     option.checked = option.value === state.management;
   }
   localStorage.setItem("openclaw-deployer.management", state.management);
+  if (els.filesystemSource) {
+    renderFilesystemSource();
+  }
 }
 
 els.provision.addEventListener("click", async () => {
@@ -317,6 +392,10 @@ els.provision.addEventListener("click", async () => {
   const gcpProject = els.gcpProject.value.trim();
   const gcpLocation = els.gcpLocation.value.trim();
   const management = selectedManagement();
+  const source = management === "user" ? els.filesystemSource.value : "";
+  const gitURL = els.gitURL.value.trim();
+  const gitRef = els.gitRef.value.trim();
+  const gitPath = els.gitPath.value.trim();
 
   if (!namespace || !name || !apiKey) {
     setStatus(`Namespace, OpenClaw name, and ${isGoogleVertex ? "service account JSON" : "API key"} are required.`, true);
@@ -330,16 +409,37 @@ els.provision.addEventListener("click", async () => {
     setStatus('Valid JSON with type "service_account" or "authorized_user" is required.', true);
     return;
   }
+  if (source === "git" && !gitURL) {
+    setStatus("Git URL is required for a Git filesystem source.", true);
+    return;
+  }
+  if (source === "upload" && els.agentFiles.files.length === 0) {
+    setStatus("Choose a folder to upload, or pick a different filesystem source.", true);
+    return;
+  }
 
   setBusy(true);
-  setStatus(state.exists ? "Adding or updating provider..." : "Creating OpenClaw...");
   try {
+    // An uploaded folder is packaged into a ConfigMap first; provisioning then
+    // references it. Git and "None" provision directly.
+    let filesystemSource = source;
+    let configMapName = "";
+    if (source === "upload") {
+      setStatus("Uploading folder...");
+      configMapName = await uploadAgentFiles(namespace, name, els.agentFiles.files);
+      filesystemSource = "configmap";
+    }
+    setStatus(state.exists ? "Adding or updating provider..." : "Creating OpenClaw...");
     const current = await api("/api/provision", {
       method: "POST",
-      body: JSON.stringify({ namespace, name, provider, model, apiKey, gcpProject, gcpLocation, management }),
+      body: JSON.stringify({
+        namespace, name, provider, model, apiKey, gcpProject, gcpLocation, management,
+        filesystemSource, gitURL, gitRef, gitPath, configMapName,
+      }),
     });
     els.apiKey.value = "";
     els.gcpCredentials.value = "";
+    els.agentFiles.value = "";
     state.selectedName = current.name || name;
     els.clawName.value = state.selectedName;
     await refresh();
@@ -390,8 +490,47 @@ async function deleteClaw(namespace, name) {
   }
 }
 
+let namespaceDebounce;
+els.namespace.addEventListener("input", () => {
+  clearTimeout(namespaceDebounce);
+  namespaceDebounce = setTimeout(refresh, 300);
+});
 els.namespace.addEventListener("change", refresh);
 els.clawName.addEventListener("change", refresh);
+els.filesystemSource.addEventListener("change", () => {
+  state.filesystemSource = els.filesystemSource.value;
+  localStorage.setItem("openclaw-deployer.filesystemSource", state.filesystemSource);
+  renderFilesystemSource();
+});
+for (const [el, key] of [
+  [els.gitURL, "gitURL"],
+  [els.gitRef, "gitRef"],
+  [els.gitPath, "gitPath"],
+]) {
+  el.addEventListener("change", () => {
+    state[key] = el.value.trim();
+    localStorage.setItem(`openclaw-deployer.${key}`, state[key]);
+  });
+}
+
+async function uploadAgentFiles(namespace, name, fileList) {
+  const form = new FormData();
+  for (const file of fileList) {
+    const relative = file.webkitRelativePath || file.name;
+    // Drop the top-level folder name so archive paths are repo-root relative.
+    const archivePath = relative.includes("/") ? relative.slice(relative.indexOf("/") + 1) : relative;
+    form.append(archivePath, file, file.name);
+  }
+  const response = await fetch(
+    `/api/agentfiles?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+    { method: "POST", body: form },
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Upload failed: ${response.status}`);
+  }
+  return payload.configMapName;
+}
 els.provider.addEventListener("change", () => {
   state.provider = els.provider.value;
   renderModelOptions();
@@ -417,6 +556,18 @@ for (const option of els.managementOptions) {
       setManagement(option.value);
     }
   });
+}
+
+function isSafeHref(href) {
+  if (!href) {
+    return false;
+  }
+  try {
+    const url = new URL(href, document.baseURI);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function isSupportedGCPKey(value) {

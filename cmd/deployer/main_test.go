@@ -17,6 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -183,7 +186,7 @@ func TestCurrentClawSpecReturnsNonNotFoundErrors(t *testing.T) {
 				bearerToken: "service-account-token",
 				client:      client,
 			}
-			credentials, raw, err := s.currentClawSpec(context.Background(), userIdentity{}, "sallyom-claw", "instance")
+			credentials, raw, _, err := s.currentClawSpec(context.Background(), userIdentity{}, "sallyom-claw", "instance")
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -355,6 +358,61 @@ func TestHandleClawsListsAllVisibleNamespaces(t *testing.T) {
 				Header:     make(http.Header),
 				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
+		}),
+	}
+	s := &server{
+		apiServer:   "https://kubernetes.example.test",
+		bearerToken: "service-account-token",
+		client:      client,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleClaws(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var payload listResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Len(t, payload.Claws, 2)
+	assert.Equal(t, "sallyom-claw", payload.Claws[0].Namespace)
+	assert.Equal(t, "shifty", payload.Claws[0].Name)
+	assert.Equal(t, "somalley-unmanaged-openclaw-test", payload.Claws[1].Namespace)
+	assert.Equal(t, "unmanaged", payload.Claws[1].Name)
+}
+
+func TestHandleClawsFallsBackToVisibleOpenShiftProjects(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/apis/claw.sandbox.redhat.com/v1alpha1/claws", "/api/v1/namespaces":
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"forbidden"}`)),
+				}, nil
+			case "/apis/project.openshift.io/v1/projects":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"items":[{"metadata":{"name":"sallyom-claw"}},{"metadata":{"name":"somalley-unmanaged-openclaw-test"}}]}`)),
+				}, nil
+			case "/apis/claw.sandbox.redhat.com/v1alpha1/namespaces/sallyom-claw/claws":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"items":[{"metadata":{"namespace":"sallyom-claw","name":"shifty"}}]}`)),
+				}, nil
+			case "/apis/claw.sandbox.redhat.com/v1alpha1/namespaces/somalley-unmanaged-openclaw-test/claws":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"items":[{"metadata":{"namespace":"somalley-unmanaged-openclaw-test","name":"unmanaged"}}]}`)),
+				}, nil
+			default:
+				t.Fatalf("unexpected request path %s", r.URL.Path)
+				return nil, nil
+			}
 		}),
 	}
 	s := &server{
@@ -602,6 +660,179 @@ func TestApplyAgentConfigPreservesUserAgents(t *testing.T) {
 	assert.Equal(t, "Custom", custom["name"])
 	assert.Equal(t, "SallyBot", defaultAgent["name"])
 	assert.Equal(t, map[string]any{"primary": "openrouter/auto"}, defaultAgent["model"])
+}
+
+func TestValidateFilesystemSource(t *testing.T) {
+	tests := map[string]struct {
+		req     provisionRequest
+		wantErr bool
+	}{
+		"none":              {req: provisionRequest{}},
+		"git user":          {req: provisionRequest{FilesystemSource: "git", GitURL: "https://example.com/repo.git", Management: "user"}},
+		"git operator":      {req: provisionRequest{FilesystemSource: "git", GitURL: "https://example.com/repo.git", Management: "operator"}, wantErr: true},
+		"git bad url":       {req: provisionRequest{FilesystemSource: "git", GitURL: "git@example.com:repo.git", Management: "user"}, wantErr: true},
+		"git empty url":     {req: provisionRequest{FilesystemSource: "git", Management: "user"}, wantErr: true},
+		"configmap user":    {req: provisionRequest{FilesystemSource: "configmap", ConfigMapName: "seed", Management: "user"}},
+		"configmap no name": {req: provisionRequest{FilesystemSource: "configmap", Management: "user"}, wantErr: true},
+		"unknown source":    {req: provisionRequest{FilesystemSource: "ftp", Management: "user"}, wantErr: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			req := tt.req
+			err := validateFilesystemSource(&req)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestAgentFilesSpec(t *testing.T) {
+	assert.Nil(t, agentFilesSpec(provisionRequest{}))
+
+	git := agentFilesSpec(provisionRequest{FilesystemSource: "git", GitURL: "https://example.com/repo.git", GitRef: "main", GitPath: "agents"})
+	assert.Equal(t, map[string]any{"git": map[string]any{
+		"url":  "https://example.com/repo.git",
+		"ref":  "main",
+		"path": "agents",
+	}}, git)
+
+	cm := agentFilesSpec(provisionRequest{FilesystemSource: "configmap", ConfigMapName: "seed"})
+	assert.Equal(t, map[string]any{"configMapRef": map[string]any{"name": "seed"}}, cm)
+}
+
+func TestApplyClawSetsGitAgentFiles(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+				}, nil
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	req := provisionRequest{
+		Namespace:        "sallyom-claw",
+		Name:             "instance",
+		Provider:         "google",
+		Management:       "user",
+		FilesystemSource: "git",
+		GitURL:           "https://example.com/repo.git",
+		GitRef:           "main",
+	}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	url, _, _ := nestedString(applied, "spec", "agentFiles", "git", "url")
+	assert.Equal(t, "https://example.com/repo.git", url)
+	ref, _, _ := nestedString(applied, "spec", "agentFiles", "git", "ref")
+	assert.Equal(t, "main", ref)
+}
+
+func TestApplyClawPreservesExistingAgentFiles(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"metadata": {"name": "instance"},
+						"spec": {"agentFiles": {"git": {"url": "https://example.com/repo.git"}}}
+					}`)),
+				}, nil
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	req := provisionRequest{Namespace: "sallyom-claw", Name: "instance", Provider: "google", Management: "user"}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	url, _, _ := nestedString(applied, "spec", "agentFiles", "git", "url")
+	assert.Equal(t, "https://example.com/repo.git", url)
+}
+
+func TestCleanArchivePath(t *testing.T) {
+	tests := map[string]string{
+		"workspace-main/AGENTS.md": "workspace-main/AGENTS.md",
+		"/openclaw.json":           "openclaw.json",
+		"./skills/x.md":            "skills/x.md",
+		"../../etc/passwd":         "",
+		"":                         "",
+		"  spaced/file.md  ":       "spaced/file.md",
+	}
+	for input, want := range tests {
+		t.Run(input, func(t *testing.T) {
+			assert.Equal(t, want, cleanArchivePath(input))
+		})
+	}
+}
+
+func TestBuildAgentFilesArchive(t *testing.T) {
+	archive, err := buildAgentFilesArchive(map[string][]byte{
+		"openclaw.json":            []byte(`{"a":1}`),
+		"workspace-main/AGENTS.md": []byte("hello"),
+	})
+	require.NoError(t, err)
+
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	require.NoError(t, err)
+	tr := tar.NewReader(gz)
+	found := map[string]string{}
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		content, err := io.ReadAll(tr)
+		require.NoError(t, err)
+		found[header.Name] = string(content)
+	}
+	assert.Equal(t, `{"a":1}`, found["openclaw.json"])
+	assert.Equal(t, "hello", found["workspace-main/AGENTS.md"])
+}
+
+func TestApplyAgentConfigClearsStaleModelWhenEmpty(t *testing.T) {
+	raw := map[string]any{
+		"agents": map[string]any{
+			"defaults": map[string]any{
+				"model":  map[string]any{"primary": "openai/gpt-5.5"},
+				"models": map[string]any{"openai/gpt-5.5": map[string]any{"alias": "openai/gpt-5.5"}},
+			},
+			"list": []any{
+				map[string]any{"id": "default", "name": "Instance", "model": map[string]any{"primary": "openai/gpt-5.5"}},
+			},
+		},
+	}
+	next := applyAgentConfig(raw, "Instance", "")
+
+	_, hasModel, _ := nestedValue(next, "agents", "defaults", "model")
+	assert.False(t, hasModel, "defaults.model should be cleared")
+	_, hasModels, _ := nestedValue(next, "agents", "defaults", "models")
+	assert.False(t, hasModels, "defaults.models should be cleared")
+	agents, _, _ := nestedSlice(next, "agents", "list")
+	require.Len(t, agents, 1)
+	_, agentHasModel := agents[0].(map[string]any)["model"]
+	assert.False(t, agentHasModel, "default agent model override should be cleared")
 }
 
 func TestReadyCondition(t *testing.T) {

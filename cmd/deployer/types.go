@@ -58,6 +58,16 @@ type provisionRequest struct {
 	GCPProject  string `json:"gcpProject"`
 	GCPLocation string `json:"gcpLocation"`
 	Management  string `json:"management"`
+
+	// FilesystemSource seeds the Claw filesystem from a Git repository or a
+	// ConfigMap. It maps to spec.agentFiles and is only honored by the operator
+	// when Management is "user". Empty leaves any existing source unchanged.
+	FilesystemSource string `json:"filesystemSource"`
+	GitURL           string `json:"gitURL"`
+	GitRef           string `json:"gitRef"`
+	GitPath          string `json:"gitPath"`
+	ConfigMapName    string `json:"configMapName"`
+	ConfigMapKey     string `json:"configMapKey"`
 }
 
 type meResponse struct {
