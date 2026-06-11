@@ -39,6 +39,7 @@ func main() {
 	mux.HandleFunc("GET /api/claws", s.handleClaws)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/provision", s.handleProvision)
+	mux.HandleFunc("POST /api/agentfiles", s.handleAgentFiles)
 	mux.HandleFunc("POST /api/restart", s.handleRestart)
 	mux.HandleFunc("DELETE /api/claw", s.handleDelete)
 	mux.Handle("GET /static/", s.static)
@@ -63,13 +64,18 @@ func newServer() (*server, error) {
 	if err != nil {
 		return nil, err
 	}
+	defaultConfigManagement, err := normalizeConfigManagement(getenv("CLAW_CONFIG_MANAGEMENT_DEFAULT", defaultManagement))
+	if err != nil {
+		return nil, err
+	}
 
 	return &server{
-		apiServer:       apiServer,
-		bearerToken:     bearerToken,
-		impersonate:     impersonate,
-		namespaceSuffix: getenv("CLAW_NAMESPACE_SUFFIX", defaultNSSuffix),
-		client:          client,
-		static:          http.FileServer(http.FS(staticFiles)),
+		apiServer:         apiServer,
+		bearerToken:       bearerToken,
+		impersonate:       impersonate,
+		namespaceSuffix:   getenv("CLAW_NAMESPACE_SUFFIX", defaultNSSuffix),
+		defaultManagement: defaultConfigManagement,
+		client:            client,
+		static:            http.FileServer(http.FS(staticFiles)),
 	}, nil
 }

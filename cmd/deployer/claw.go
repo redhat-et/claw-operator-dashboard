@@ -30,6 +30,73 @@ func (s *server) listClaws(ctx context.Context, identity userIdentity, namespace
 	if err := s.kubeJSON(ctx, identity, http.MethodGet, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", namespace, "claws"), nil, &list); err != nil {
 		return nil, err
 	}
+	return clawStatesFromList(list), nil
+}
+
+func (s *server) listAllClaws(ctx context.Context, identity userIdentity) ([]stateResponse, error) {
+	var list map[string]any
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, "/apis/claw.sandbox.redhat.com/v1alpha1/claws", nil, &list); err != nil {
+		var apiErr apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+			return nil, err
+		}
+		return s.listClawsByVisibleNamespaces(ctx, identity)
+	}
+	return clawStatesFromList(list), nil
+}
+
+func (s *server) listClawsByVisibleNamespaces(ctx context.Context, identity userIdentity) ([]stateResponse, error) {
+	namespaces, err := s.visibleNamespaceNames(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	claws := []stateResponse{}
+	for _, name := range namespaces {
+		namespaceClaws, err := s.listClaws(ctx, identity, name)
+		if err != nil {
+			var apiErr apiError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		claws = append(claws, namespaceClaws...)
+	}
+	sortClaws(claws)
+	return claws, nil
+}
+
+func (s *server) visibleNamespaceNames(ctx context.Context, identity userIdentity) ([]string, error) {
+	var namespaceList map[string]any
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, "/api/v1/namespaces", nil, &namespaceList); err != nil {
+		var apiErr apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+			return nil, err
+		}
+		var projectList map[string]any
+		if projectErr := s.kubeJSON(ctx, identity, http.MethodGet, "/apis/project.openshift.io/v1/projects", nil, &projectList); projectErr != nil {
+			return nil, projectErr
+		}
+		namespaceList = projectList
+	}
+	items, _, _ := nestedSlice(namespaceList, "items")
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		namespace, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := nestedString(namespace, "metadata", "name")
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func clawStatesFromList(list map[string]any) []stateResponse {
 	items, _, _ := nestedSlice(list, "items")
 	claws := make([]stateResponse, 0, len(items))
 	for _, item := range items {
@@ -39,10 +106,17 @@ func (s *server) listClaws(ctx context.Context, identity userIdentity, namespace
 		}
 		claws = append(claws, stateFromClaw(claw))
 	}
+	sortClaws(claws)
+	return claws
+}
+
+func sortClaws(claws []stateResponse) {
 	sort.Slice(claws, func(i, j int) bool {
+		if claws[i].Namespace != claws[j].Namespace {
+			return claws[i].Namespace < claws[j].Namespace
+		}
 		return claws[i].Name < claws[j].Name
 	})
-	return claws, nil
 }
 
 func (s *server) getState(ctx context.Context, identity userIdentity, namespace, name string) (stateResponse, error) {
@@ -66,11 +140,17 @@ func stateFromClaw(claw map[string]any) stateResponse {
 		provider = providers[0]
 	}
 	name, _, _ := nestedString(claw, "metadata", "name")
+	namespace, _, _ := nestedString(claw, "metadata", "namespace")
 	createdAt, _, _ := nestedString(claw, "metadata", "creationTimestamp")
 	model, _, _ := nestedString(claw, "spec", "config", "raw", "agents", "defaults", "model", "primary")
 	agentName := firstAgentName(claw)
+	management, _, _ := nestedString(claw, "spec", "config", "management")
+	if management == "" {
+		management = defaultManagement
+	}
 
 	return stateResponse{
+		Namespace:   namespace,
 		Name:        name,
 		Exists:      true,
 		Ready:       ready,
@@ -81,6 +161,7 @@ func stateFromClaw(claw map[string]any) stateResponse {
 		Providers:   providers,
 		Model:       model,
 		AgentName:   agentName,
+		Management:  management,
 		CreatedAt:   createdAt,
 		SecretNames: credentialSecretNames(claw),
 	}
@@ -134,13 +215,31 @@ func (s *server) ensureProject(ctx context.Context, identity userIdentity, names
 }
 
 func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provisionRequest) error {
-	credentials, rawConfig, err := s.currentClawSpec(ctx, identity, req.Namespace, req.Name)
+	if req.Management == "" {
+		req.Management = s.defaultConfigManagement()
+	}
+	credentials, rawConfig, agentFiles, err := s.currentClawSpec(ctx, identity, req.Namespace, req.Name)
 	if err != nil {
 		return err
 	}
 	credentials = upsertProvisionCredential(credentials, req)
-	if req.Model != "" {
+	if req.AgentName != "" {
 		rawConfig = applyAgentConfig(rawConfig, req.AgentName, req.Model)
+	}
+	if next := agentFilesSpec(req); next != nil {
+		agentFiles = next
+	}
+
+	spec := map[string]any{
+		"credentials": credentials,
+		"config": map[string]any{
+			"raw":        rawConfig,
+			"mergeMode":  "merge",
+			"management": req.Management,
+		},
+	}
+	if len(agentFiles) > 0 {
+		spec["agentFiles"] = agentFiles
 	}
 
 	body := map[string]any{
@@ -153,30 +252,58 @@ func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provi
 				managedByLabel: managedByValue,
 			},
 		},
-		"spec": map[string]any{
-			"credentials": credentials,
-			"config": map[string]any{
-				"raw":       rawConfig,
-				"mergeMode": "merge",
-			},
-		},
+		"spec": spec,
 	}
 	return s.apply(ctx, identity, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", req.Namespace, "claws", req.Name), body)
 }
 
-func (s *server) currentClawSpec(ctx context.Context, identity userIdentity, namespace, name string) ([]any, map[string]any, error) {
+// agentFilesSpec builds the spec.agentFiles object for a provision request, or
+// nil when no filesystem source was requested (so an existing source is left
+// untouched on update). The operator only acts on agentFiles for user-managed
+// Claws; handleProvision enforces that before this is called.
+func agentFilesSpec(req provisionRequest) map[string]any {
+	switch req.FilesystemSource {
+	case "git":
+		git := map[string]any{"url": req.GitURL}
+		if req.GitRef != "" {
+			git["ref"] = req.GitRef
+		}
+		if req.GitPath != "" {
+			git["path"] = req.GitPath
+		}
+		return map[string]any{"git": git}
+	case "configmap":
+		ref := map[string]any{"name": req.ConfigMapName}
+		if req.ConfigMapKey != "" {
+			ref["key"] = req.ConfigMapKey
+		}
+		return map[string]any{"configMapRef": ref}
+	default:
+		return nil
+	}
+}
+
+func (s *server) defaultConfigManagement() string {
+	if s.defaultManagement == "" {
+		return defaultManagement
+	}
+	return s.defaultManagement
+}
+
+func (s *server) currentClawSpec(ctx context.Context, identity userIdentity, namespace, name string) ([]any, map[string]any, map[string]any, error) {
 	var claw map[string]any
 	err := s.kubeJSON(ctx, identity, http.MethodGet, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", namespace, "claws", name), nil, &claw)
 	if err != nil {
 		var apiErr apiError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			return nil, map[string]any{}, nil
+			return nil, map[string]any{}, nil, nil
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	credentials, _, _ := nestedSlice(claw, "spec", "credentials")
 	raw, _, _ := nestedMap(claw, "spec", "config", "raw")
-	return credentials, cloneMap(raw), nil
+	agentFiles, _, _ := nestedMap(claw, "spec", "agentFiles")
+	return credentials, cloneMap(raw), cloneMap(agentFiles), nil
 }
 
 func upsertCredential(credentials []any, instanceName, provider string) []any {
@@ -235,16 +362,25 @@ func applyAgentConfig(raw map[string]any, agentName, model string) map[string]an
 	config := cloneMap(raw)
 	agents := ensureMap(config, "agents")
 	defaults := ensureMap(agents, "defaults")
-	defaults["model"] = map[string]any{"primary": model}
-	models := ensureMap(defaults, "models")
-	models[model] = map[string]any{"alias": model}
+	if model != "" {
+		defaults["model"] = map[string]any{"primary": model}
+		models := ensureMap(defaults, "models")
+		models[model] = map[string]any{"alias": model}
+	} else {
+		// Blank model means "use the provider default": drop any override this
+		// deployer previously set so a stale model does not linger.
+		delete(defaults, "model")
+		delete(defaults, "models")
+	}
 
 	defaultAgent := map[string]any{
 		"id":        "default",
 		"name":      agentName,
 		"identity":  map[string]string{"name": agentName},
 		"workspace": "~/.openclaw/workspace",
-		"model":     map[string]any{"primary": model},
+	}
+	if model != "" {
+		defaultAgent["model"] = map[string]any{"primary": model}
 	}
 	existing, _ := agents["list"].([]any)
 	list := append([]any(nil), existing...)
@@ -259,6 +395,9 @@ func applyAgentConfig(raw map[string]any, agentName, model string) map[string]an
 			next := cloneMap(agent)
 			for key, value := range defaultAgent {
 				next[key] = value
+			}
+			if model == "" {
+				delete(next, "model")
 			}
 			list[i] = next
 			agents["list"] = list
@@ -288,6 +427,21 @@ func (s *server) restartDeployments(ctx context.Context, identity userIdentity, 
 		}
 	}
 	return nil
+}
+
+func (s *server) deleteManagedAgentFiles(ctx context.Context, identity userIdentity, namespace, name string) error {
+	configMapName := agentFilesConfigMapName(name)
+	var configMap map[string]any
+	configMapPath := apiPath("api/v1/namespaces", namespace, "configmaps", configMapName)
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, configMapPath, nil, &configMap); err != nil {
+		return err
+	}
+	managedBy, _, _ := nestedString(configMap, "metadata", "labels", managedByLabel)
+	instance, _, _ := nestedString(configMap, "metadata", "labels", instanceLabel)
+	if managedBy != managedByValue || instance != name {
+		return nil
+	}
+	return s.delete(ctx, identity, configMapPath)
 }
 
 func (s *server) deleteManagedSecret(ctx context.Context, identity userIdentity, namespace, name, secretName string) error {

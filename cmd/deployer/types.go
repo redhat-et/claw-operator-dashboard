@@ -30,15 +30,17 @@ const (
 	inClusterTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultListenAddr  = ":8080"
 	defaultNSSuffix    = "-claw"
+	defaultManagement  = "operator"
 )
 
 type server struct {
-	apiServer       string
-	bearerToken     string
-	impersonate     bool
-	namespaceSuffix string
-	client          *http.Client
-	static          http.Handler
+	apiServer         string
+	bearerToken       string
+	impersonate       bool
+	namespaceSuffix   string
+	defaultManagement string
+	client            *http.Client
+	static            http.Handler
 }
 
 type userIdentity struct {
@@ -55,15 +57,28 @@ type provisionRequest struct {
 	APIKey      string `json:"apiKey"`
 	GCPProject  string `json:"gcpProject"`
 	GCPLocation string `json:"gcpLocation"`
+	Management  string `json:"management"`
+
+	// FilesystemSource seeds the Claw filesystem from a Git repository or a
+	// ConfigMap. It maps to spec.agentFiles and is only honored by the operator
+	// when Management is "user". Empty leaves any existing source unchanged.
+	FilesystemSource string `json:"filesystemSource"`
+	GitURL           string `json:"gitURL"`
+	GitRef           string `json:"gitRef"`
+	GitPath          string `json:"gitPath"`
+	ConfigMapName    string `json:"configMapName"`
+	ConfigMapKey     string `json:"configMapKey"`
 }
 
 type meResponse struct {
-	User             string   `json:"user,omitempty"`
-	DefaultNamespace string   `json:"defaultNamespace,omitempty"`
-	Providers        []string `json:"providers"`
+	User              string   `json:"user,omitempty"`
+	DefaultNamespace  string   `json:"defaultNamespace,omitempty"`
+	DefaultManagement string   `json:"defaultManagement"`
+	Providers         []string `json:"providers"`
 }
 
 type stateResponse struct {
+	Namespace   string   `json:"namespace,omitempty"`
 	Name        string   `json:"name,omitempty"`
 	Exists      bool     `json:"exists"`
 	Ready       bool     `json:"ready"`
@@ -74,6 +89,7 @@ type stateResponse struct {
 	Providers   []string `json:"providers,omitempty"`
 	Model       string   `json:"model,omitempty"`
 	AgentName   string   `json:"agentName,omitempty"`
+	Management  string   `json:"management,omitempty"`
 	CreatedAt   string   `json:"createdAt,omitempty"`
 	SecretNames []string `json:"-"`
 }

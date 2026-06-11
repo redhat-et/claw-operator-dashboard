@@ -1,0 +1,65 @@
+# Cluster RBAC for human Claw administrators (for example the htpasswd user
+# "claw-admin"). This is read-only access to Claws and the resources the admin
+# dashboard surfaces, so a Claw admin can inspect every Claw and its workloads
+# without holding cluster-admin. It also satisfies the admin dashboard
+# oauth-proxy SAR, which requires the logged-in user to be able to list Claws.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openclaw-claw-admin
+rules:
+  - apiGroups:
+      - claw.sandbox.redhat.com
+    resources:
+      - claws
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - events
+      - namespaces
+      - pods
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - route.openshift.io
+    resources:
+      - routes
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openclaw-claw-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openclaw-claw-admin
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: claw-admin

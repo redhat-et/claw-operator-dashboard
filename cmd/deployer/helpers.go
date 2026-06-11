@@ -195,6 +195,51 @@ func validateGCPServiceAccountJSON(value string) error {
 	return nil
 }
 
+// validateFilesystemSource normalizes and validates the agentFiles seeding
+// fields on req. Seeding is only honored by the operator for user-managed
+// Claws, so a source on an operator-managed request is rejected.
+func validateFilesystemSource(req *provisionRequest) error {
+	switch req.FilesystemSource {
+	case "", "none":
+		req.FilesystemSource = ""
+		return nil
+	case "git":
+		if req.Management != "user" {
+			return errors.New("filesystem seeding requires user-managed config")
+		}
+		return validateGitURL(req.GitURL)
+	case "configmap":
+		if req.Management != "user" {
+			return errors.New("filesystem seeding requires user-managed config")
+		}
+		return validateResourceName(req.ConfigMapName, "ConfigMap name")
+	default:
+		return errors.New(`filesystem source must be "git" or "configmap"`)
+	}
+}
+
+func validateGitURL(raw string) error {
+	if raw == "" {
+		return errors.New("Git URL is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return errors.New("Git URL must be an http(s) URL")
+	}
+	return nil
+}
+
+func normalizeConfigManagement(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return defaultManagement, nil
+	}
+	if value != "operator" && value != "user" {
+		return "", errors.New(`config management must be "operator" or "user"`)
+	}
+	return value, nil
+}
+
 func normalizeModelRef(provider, model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
