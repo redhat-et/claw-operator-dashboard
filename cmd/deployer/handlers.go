@@ -178,6 +178,16 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	req.FilesystemSource = strings.ToLower(strings.TrimSpace(req.FilesystemSource))
+	req.GitURL = strings.TrimSpace(req.GitURL)
+	req.GitRef = strings.TrimSpace(req.GitRef)
+	req.GitPath = strings.TrimSpace(req.GitPath)
+	req.ConfigMapName = strings.TrimSpace(req.ConfigMapName)
+	req.ConfigMapKey = strings.TrimSpace(req.ConfigMapKey)
+	if err := validateFilesystemSource(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.ensureProject(r.Context(), identity, req.Namespace); err != nil {
 		writeError(w, statusCodeFor(err), "failed to create project: "+err.Error())
 		return
@@ -266,6 +276,7 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	for _, secretName := range secretNames {
 		_ = s.deleteManagedSecret(r.Context(), identity, namespace, name, secretName)
 	}
+	_ = s.deleteManagedAgentFiles(r.Context(), identity, namespace, name)
 	writeJSON(w, http.StatusOK, stateResponse{Exists: false})
 }
 

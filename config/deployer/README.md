@@ -13,6 +13,22 @@ For each Claw, the deployer creates or deletes in the selected namespace:
 
 - a provider API key Secret named `openclaw-<name>-<provider>-api-key`
 - a `claw.sandbox.redhat.com/v1alpha1` `Claw`
+- when a folder is uploaded to seed the filesystem, a ConfigMap named
+  `openclaw-<name>-agentfiles` holding the packaged `agentfiles.tgz`
+
+## Seeding the Claw filesystem
+
+When **Config owner** is set to **User**, the form offers a **Filesystem
+source** that maps to `spec.agentFiles` on the Claw (the operator only honors
+it for user-managed Claws):
+
+- **Git repository** — a repository URL with an optional ref and subpath. The
+  operator clones it in the init container.
+- **Upload a folder** — pick a folder in the browser (for example one with
+  `workspace-main/`, `skills/`, and `openclaw.json`). The backend packages it
+  into `agentfiles.tgz`, stores it in the `openclaw-<name>-agentfiles`
+  ConfigMap as the impersonated user, and points `spec.agentFiles.configMapRef`
+  at it — no manual `tar`/ConfigMap step. Uploads are capped at 1 MiB.
 
 ## Build
 

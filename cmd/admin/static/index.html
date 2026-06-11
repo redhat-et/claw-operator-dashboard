@@ -65,6 +65,16 @@
         <p class="status" id="status">Loading cluster inventory...</p>
       </section>
     </main>
+
+    <div class="modal" id="config-modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="config-title">
+        <header class="modal-head">
+          <h2 id="config-title"></h2>
+          <button type="button" class="modal-close" id="config-close" aria-label="Close">✕</button>
+        </header>
+        <pre class="modal-body" id="config-body"></pre>
+      </div>
+    </div>
     <script src="/static/app.js"></script>
   </body>
 </html>

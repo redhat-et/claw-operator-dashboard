@@ -96,6 +96,32 @@
                 <input id="apiKey" name="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste provider key">
                 <textarea id="gcpCredentials" name="gcpCredentials" class="credential-json" autocomplete="off" spellcheck="false" rows="6" placeholder="Paste your service account JSON key" hidden></textarea>
               </label>
+              <fieldset class="field-group" id="filesystem-source-group">
+                <legend>Filesystem source</legend>
+                <select id="filesystemSource" name="filesystemSource" aria-label="Filesystem source">
+                  <option value="">None</option>
+                  <option value="git">Git repository</option>
+                  <option value="upload">Upload a folder</option>
+                </select>
+                <p class="field-hint" id="filesystem-source-hint">Seeds the OpenClaw filesystem on first boot. Requires user-managed config.</p>
+                <label id="git-url-row" hidden>
+                  Git URL
+                  <input id="gitURL" name="gitURL" autocomplete="off" placeholder="https://github.com/org/repo.git">
+                </label>
+                <label id="git-ref-row" hidden>
+                  Git ref (optional)
+                  <input id="gitRef" name="gitRef" autocomplete="off" placeholder="main">
+                </label>
+                <label id="git-path-row" hidden>
+                  Path in repo (optional)
+                  <input id="gitPath" name="gitPath" autocomplete="off" placeholder="agents/">
+                </label>
+                <label id="upload-row" hidden>
+                  Folder to seed
+                  <input id="agentFiles" name="agentFiles" type="file" webkitdirectory multiple>
+                  <span class="field-hint">Pick a folder (for example with <code>workspace-main/</code>, <code>skills/</code>, <code>openclaw.json</code>). It is packaged and uploaded on Create.</span>
+                </label>
+              </fieldset>
             </form>
 
             <p class="status" id="status">Checking status...</p>

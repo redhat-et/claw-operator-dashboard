@@ -307,6 +307,18 @@ textarea.credential-json {
   -webkit-text-security: disc;
 }
 
+.field-group {
+  display: grid;
+  gap: 6px;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 input:focus,
 select:focus,
 textarea:focus {

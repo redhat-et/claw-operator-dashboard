@@ -13,6 +13,10 @@ const els = {
   claws: document.getElementById("claws"),
   status: document.getElementById("status"),
   modeButtons: document.querySelectorAll("[data-mode]"),
+  configModal: document.getElementById("config-modal"),
+  configTitle: document.getElementById("config-title"),
+  configBody: document.getElementById("config-body"),
+  configClose: document.getElementById("config-close"),
 };
 
 async function api(path) {
@@ -112,7 +116,7 @@ function renderRows() {
         ["Claw", claw.clawConsoleURL],
         [claw.configMapName, claw.configMapURL],
         [claw.proxyConfigMapName, claw.proxyConfigMapURL],
-      ])}</td>
+      ])}<button type="button" class="link-button view-config" data-namespace="${escapeAttr(claw.namespace)}" data-name="${escapeAttr(claw.name)}">Effective config</button></td>
       <td>${renderResourceLinks([
         [claw.gatewayDeployment, claw.gatewayDeploymentURL],
         [claw.proxyDeployment, claw.proxyDeploymentURL],
@@ -201,6 +205,49 @@ for (const button of els.modeButtons) {
 els.search.addEventListener("input", () => {
   state.search = els.search.value.trim();
   renderRows();
+});
+
+els.claws.addEventListener("click", (event) => {
+  const button = event.target.closest(".view-config");
+  if (!button) {
+    return;
+  }
+  openConfig(button.dataset.namespace, button.dataset.name);
+});
+
+function openConfig(namespace, name) {
+  // The live, effective openclaw.json lives on the Claw's ReadWriteOnce PVC,
+  // mounted in the running gateway pod, so it can only be read from that pod.
+  els.configTitle.textContent = `${namespace}/${name} — effective config`;
+  els.configBody.textContent = [
+    "The live, effective openclaw.json is on the Claw's PVC:",
+    "",
+    `  PVC:   ${name}-home-pvc`,
+    "  Path:  /home/node/.openclaw/openclaw.json",
+    "",
+    "Read it from the running pod (requires pods/exec):",
+    "",
+    `  oc exec -n ${namespace} deploy/${name} -- cat /home/node/.openclaw/openclaw.json`,
+    "",
+    "Or open the pod's Terminal tab in the OpenShift console.",
+  ].join("\n");
+  els.configModal.hidden = false;
+}
+
+function closeConfig() {
+  els.configModal.hidden = true;
+}
+
+els.configClose.addEventListener("click", closeConfig);
+els.configModal.addEventListener("click", (event) => {
+  if (event.target === els.configModal) {
+    closeConfig();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.configModal.hidden) {
+    closeConfig();
+  }
 });
 
 init();

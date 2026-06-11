@@ -39,6 +39,7 @@ func main() {
 	mux.HandleFunc("GET /api/claws", s.handleClaws)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/provision", s.handleProvision)
+	mux.HandleFunc("POST /api/agentfiles", s.handleAgentFiles)
 	mux.HandleFunc("POST /api/restart", s.handleRestart)
 	mux.HandleFunc("DELETE /api/claw", s.handleDelete)
 	mux.Handle("GET /static/", s.static)
