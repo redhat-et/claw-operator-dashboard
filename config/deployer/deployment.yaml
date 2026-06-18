@@ -4,6 +4,9 @@ metadata:
   name: openclaw-deployer
   labels:
     app.kubernetes.io/name: openclaw-deployer
+  annotations:
+    image.openshift.io/triggers: |
+      [{"from":{"kind":"ImageStreamTag","name":"openclaw-deployer:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
 spec:
   replicas: 1
   selector:
