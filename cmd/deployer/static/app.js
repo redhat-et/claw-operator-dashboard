@@ -212,47 +212,21 @@ async function refresh() {
   localStorage.setItem("openclaw-deployer.gcpLocation", state.gcpLocation);
 
   setStatus("Checking status…");
-  // Prefer a namespace-scoped read so polling does not list Claws cluster-wide
-  // on every refresh; fall back to the cluster-wide list only if needed.
   try {
-    const path = state.namespace
-      ? `/api/claws?namespace=${encodeURIComponent(state.namespace)}`
-      : "/api/claws";
-    const current = await api(path);
+    const current = await api("/api/claws");
     renderList(current.claws || []);
   } catch (error) {
-    if (!state.namespace) {
-      renderList([]);
-      renderAlert({ kind: "danger", title: "Couldn't list instances", body: error.message });
-      return;
-    }
-    try {
-      const current = await api("/api/claws");
-      renderList(current.claws || []);
-    } catch (clusterError) {
-      renderList([]);
-      renderAlert({ kind: "danger", title: "Couldn't list instances", body: clusterError.message });
-    }
+    renderList([]);
+    renderAlert({ kind: "danger", title: "Couldn't list instances", body: error.message });
   }
 }
 
 function renderList(claws) {
   state.claws = claws;
   renderNamespaceOptions(claws);
-  const inNamespace = state.namespace
-    ? claws.filter((claw) => (claw.namespace || state.namespace) === state.namespace)
-    : claws;
   let selected = null;
   if (state.namespace) {
-    selected = inNamespace.find((claw) => claw.name === state.selectedName) || null;
-    if (!selected && inNamespace.length > 0) {
-      // The selected name isn't running here; surface the first Claw in the
-      // namespace so switching namespaces lands on a real instance.
-      selected = inNamespace[0];
-      state.selectedName = selected.name;
-      els.clawName.value = selected.name;
-      localStorage.setItem("openclaw-deployer.name", selected.name);
-    }
+    selected = claws.find((claw) => (claw.namespace || state.namespace) === state.namespace && claw.name === state.selectedName) || null;
   }
   state.exists = Boolean(selected);
   state.ready = Boolean(selected && selected.ready);
@@ -265,7 +239,7 @@ function renderList(claws) {
   }
 
   els.provision.textContent = state.exists ? "Add/update provider" : "Create";
-  renderClaws(inNamespace);
+  renderClaws(claws);
   renderReview();
 
   if (!state.namespace) {
