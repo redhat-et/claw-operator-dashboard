@@ -111,9 +111,9 @@ toggle in the form.
 ## Automated deploys (merge to main)
 
 Merging a PR that touches deployer source rolls the running deployer out
-automatically. No one logs into the cluster.
+automatically.
 
-How it works, end to end:
+How it works:
 
 1. The `.github/workflows/deploy.yml` workflow runs on pushes to `main` that
    touch `cmd/deployer/**`, `Containerfile`, `go.mod`, or `go.sum`. It builds
@@ -130,11 +130,12 @@ How it works, end to end:
    quay digest (the ImageStream uses `referencePolicy: Source`), which produces
    a new rollout.
 
-The Deployment's `image:` stays a plain pullspec
-(`quay.io/redhat-et/claw-deployer-ui:latest`) — a plain Deployment cannot
-reference an ImageStreamTag directly. The annotation is the only link to the
-ImageStream, and the controller rewrites the field to a `…@sha256:…` digest on
-each import.
+The Deployment's `image:` stays a plain pullspec — in `deployment.yaml` it is
+`openclaw-deployer:latest`, which kustomize's `images:` transformer rewrites to
+`quay.io/redhat-et/claw-deployer-ui:latest` in the applied output. A plain
+Deployment cannot reference an ImageStreamTag directly, so the annotation is the
+only link to the ImageStream, and the trigger controller rewrites the field to a
+`…@sha256:…` digest on each import.
 
 One-time setup so the loop exists in the cluster (run once after the manifests
 are applied):
