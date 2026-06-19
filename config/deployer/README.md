@@ -107,3 +107,89 @@ The deployer binary defaults new Claws to `spec.config.management=operator`.
 These manifests set `CLAW_CONFIG_MANAGEMENT_DEFAULT=user` so this dashboard
 deployment defaults to user-managed config while still showing an Operator/User
 toggle in the form.
+
+## Automated deploys (merge to main)
+
+Merging a PR that touches deployer source rolls the running deployer out
+automatically.
+
+How it works:
+
+1. The `.github/workflows/deploy.yml` workflow runs on pushes to `main` that
+   touch `cmd/deployer/**`, `Containerfile`, `go.mod`, or `go.sum`. It builds
+   the image and pushes it to `quay.io/redhat-et/claw-deployer-ui` as both
+   `:latest` and `:<git-sha>`. It needs two repo secrets in GitHub Actions:
+   `QUAY_USERNAME` and `QUAY_PASSWORD`.
+2. The `openclaw-deployer` `ImageStream` (`imagestream.yaml`) tracks
+   `quay.io/redhat-et/claw-deployer-ui:latest` with `importPolicy.scheduled:
+   true`, so OpenShift re-imports the tag on its own timer (cluster default
+   ~15 min). When the digest changes, the ImageStreamTag updates.
+3. The Deployment carries an `image.openshift.io/triggers` annotation watching
+   that tag. When the tag's digest changes, the OpenShift image-trigger
+   controller overwrites the `app` container's `image` field with the resolved
+   quay digest (the ImageStream uses `referencePolicy: Source`), which produces
+   a new rollout.
+
+The Deployment's `image:` stays a plain pullspec — in `deployment.yaml` it is
+`openclaw-deployer:latest`, which kustomize's `images:` transformer rewrites to
+`quay.io/redhat-et/claw-deployer-ui:latest` in the applied output. A plain
+Deployment cannot reference an ImageStreamTag directly, so the annotation is the
+only link to the ImageStream, and the trigger controller rewrites the field to a
+`…@sha256:…` digest on each import.
+
+One-time setup so the loop exists in the cluster (run once after the manifests
+are applied):
+
+```sh
+oc apply -k config/deployer
+oc import-image openclaw-deployer:latest -n openclaw-deployer
+```
+
+There is up to ~15 min of latency between a merge and the rollout, because the
+import is scheduled (polling), not a webhook. To deploy immediately instead of
+waiting for the next scheduled import, force the import:
+
+```sh
+oc import-image openclaw-deployer:latest -n openclaw-deployer
+```
+
+## Manually updating the running image
+
+Useful for testing a one-off image (for example your own
+`quay.io/<you>/claw-deployer-ui:latest`) without going through a PR.
+
+Important: while the `image.openshift.io/triggers` annotation is present, the
+image-trigger controller keeps forcing the `app` container back to whatever
+`openclaw-deployer:latest` resolves to. A plain `oc set image` will be reverted
+within seconds unless you first neutralize the trigger.
+
+Option A — disable the trigger, then set your image (true ad-hoc image):
+
+```sh
+oc set triggers deployment/openclaw-deployer -n openclaw-deployer --remove-all
+oc set image deployment/openclaw-deployer app=quay.io/<you>/claw-deployer-ui:latest -n openclaw-deployer
+```
+
+Restore the automated flow when you are done by re-applying the manifests,
+which puts the annotation back and resumes tracking the redhat-et image:
+
+```sh
+oc apply -k config/deployer
+```
+
+Option B — repoint the ImageStream instead (rolls out exactly the way the
+automated flow does, through the trigger):
+
+```sh
+oc tag quay.io/<you>/claw-deployer-ui:latest openclaw-deployer:latest -n openclaw-deployer
+```
+
+Revert to the redhat-et image:
+
+```sh
+oc tag quay.io/redhat-et/claw-deployer-ui:latest openclaw-deployer:latest -n openclaw-deployer
+```
+
+Either way the committed manifests are unchanged, so the next `oc apply -k
+config/deployer` (or the next merge) brings the running deployer back to the
+real image.

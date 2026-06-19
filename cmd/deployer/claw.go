@@ -333,10 +333,6 @@ func upsertProvisionCredential(credentials []any, req provisionRequest) []any {
 	return next
 }
 
-func providerCredential(instanceName, provider string) map[string]any {
-	return providerCredentialForRequest(provisionRequest{Name: instanceName, Provider: provider})
-}
-
 func providerCredentialForRequest(req provisionRequest) map[string]any {
 	option := providers[req.Provider]
 	credential := map[string]any{

@@ -220,11 +220,11 @@ func validateFilesystemSource(req *provisionRequest) error {
 
 func validateGitURL(raw string) error {
 	if raw == "" {
-		return errors.New("Git URL is required")
+		return errors.New("git URL is required")
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("Git URL must be an http(s) URL")
+		return errors.New("git URL must be an http(s) URL")
 	}
 	return nil
 }

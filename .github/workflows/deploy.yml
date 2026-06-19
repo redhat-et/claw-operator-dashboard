@@ -1,0 +1,38 @@
+name: Build and push deployer image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cmd/deployer/**
+      - Containerfile
+      - go.mod
+      - go.sum
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: claw-deployer-ui
+          tags: latest ${{ github.sha }}
+          containerfiles: ./Containerfile
+          archs: amd64
+
+      - name: Push to Quay
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: quay.io/redhat-et
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}

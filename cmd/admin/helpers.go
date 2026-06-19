@@ -21,9 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"sort"
 	"strings"
 )
@@ -50,18 +48,6 @@ func currentUser(r *http.Request) (string, error) {
 		return user, nil
 	}
 	return "", errors.New("OpenShift username was not forwarded to the admin dashboard")
-}
-
-func apiPath(parts ...string) string {
-	escaped := make([]string, 0, len(parts))
-	for _, part := range parts {
-		for _, subpart := range strings.Split(part, "/") {
-			if subpart != "" {
-				escaped = append(escaped, url.PathEscape(subpart))
-			}
-		}
-	}
-	return "/" + path.Join(escaped...)
 }
 
 func nestedString(obj map[string]any, fields ...string) (string, bool, error) {
