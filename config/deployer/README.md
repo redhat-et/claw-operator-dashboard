@@ -104,7 +104,7 @@ different suffix. The UI keeps the field editable and suggests namespaces from
 Claws the user can see.
 
 The deployer binary defaults new Claws to `spec.config.management=operator`.
-These manifests set `CLAW_CONFIG_MANAGEMENT_DEFAULT=user` so this dashboard
+These manifests set `CLAW_CONFIG_MANAGEMENT_DEFAULT=user` so this deployer
 deployment defaults to user-managed config while still showing an Operator/User
 toggle in the form.
 
