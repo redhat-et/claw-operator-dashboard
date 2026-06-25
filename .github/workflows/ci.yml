@@ -47,4 +47,3 @@ jobs:
       - name: kustomize build
         run: |
           kubectl kustomize config/deployer > /dev/null
-          kubectl kustomize config/admin > /dev/null

@@ -1,4 +1,4 @@
-module github.com/codeready-toolchain/claw-operator-dashboard
+module github.com/redhat-et/claw-operator-extras
 
 go 1.25.9
 
