@@ -1,0 +1,29 @@
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoStack
+metadata:
+  name: tracing
+  namespace: openshift-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  size: 1x.extra-small
+  storage:
+    secret:
+      name: tempostack-s3
+      type: s3
+  retention:
+    global:
+      traces: 48h
+  tenants:
+    mode: openshift
+    authentication:
+      - tenantName: dev
+        tenantId: "1610b0c3-c509-4592-a256-a1871353dbfa"
+      - tenantName: audit
+        tenantId: "2720c1d4-d610-5693-b367-b2982464ecfb"
+  template:
+    gateway:
+      enabled: true
+    queryFrontend:
+      jaegerQuery:
+        enabled: true
