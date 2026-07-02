@@ -19,9 +19,13 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -150,43 +154,84 @@ func stateFromClaw(claw map[string]any) stateResponse {
 	}
 
 	return stateResponse{
-		Namespace:   namespace,
-		Name:        name,
-		Exists:      true,
-		Ready:       ready,
-		Reason:      reason,
-		Message:     message,
-		GatewayURL:  gatewayURL,
-		Provider:    provider,
-		Providers:   providers,
-		Model:       model,
-		AgentName:   agentName,
-		Management:  management,
-		CreatedAt:   createdAt,
-		SecretNames: credentialSecretNames(claw),
+		Namespace:      namespace,
+		Name:           name,
+		Exists:         true,
+		Ready:          ready,
+		Reason:         reason,
+		Message:        message,
+		GatewayURL:     gatewayURL,
+		Provider:       provider,
+		Providers:      providers,
+		Model:          model,
+		AgentName:      agentName,
+		Management:     management,
+		CreatedAt:      createdAt,
+		SecretNames:    credentialSecretNames(claw),
+		CredentialRefs: credentialRefs(claw),
 	}
 }
 
 func (s *server) applySecret(ctx context.Context, identity userIdentity, req provisionRequest) error {
-	option := providers[req.Provider]
+	return s.applyOpaqueSecret(ctx, identity, req.Namespace, credentialSecretName(req), map[string]string{
+		credentialSecretKey(req): req.APIKey,
+	}, map[string]string{
+		managedByLabel: managedByValue,
+		instanceLabel:  req.Name,
+		providerLabel:  req.Provider,
+	})
+}
+
+func (s *server) applyOpaqueSecret(ctx context.Context, identity userIdentity, namespace, name string, data, labels map[string]string) error {
+	encoded := make(map[string]string, len(data))
+	for key, value := range data {
+		encoded[key] = base64.StdEncoding.EncodeToString([]byte(value))
+	}
 	body := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
-			"name":      secretNameForRequest(req),
-			"namespace": req.Namespace,
-			"labels": map[string]string{
-				managedByLabel: managedByValue,
-				instanceLabel:  req.Name,
-				providerLabel:  req.Provider,
-			},
+			"name":      name,
+			"namespace": namespace,
+			"labels":    labels,
 		},
 		"type": "Opaque",
-		"data": map[string]string{
-			option.SecretKey: base64.StdEncoding.EncodeToString([]byte(req.APIKey)),
-		},
+		"data": encoded,
 	}
-	return s.apply(ctx, identity, apiPath("api/v1/namespaces", req.Namespace, "secrets", secretNameForRequest(req)), body)
+	return s.apply(ctx, identity, apiPath("api/v1/namespaces", namespace, "secrets", name), body)
+}
+
+func (s *server) applyIntegrationSecrets(ctx context.Context, identity userIdentity, req provisionRequest) error {
+	for _, integration := range req.Integrations {
+		secrets := integrationSecrets(req.Name, integration)
+		for _, secret := range secrets {
+			if len(secret.data) == 0 {
+				continue
+			}
+			if err := s.applyOpaqueSecret(ctx, identity, req.Namespace, secret.name, secret.data, map[string]string{
+				managedByLabel: managedByValue,
+				instanceLabel:  req.Name,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if req.GitUsername != "" || req.GitPassword != "" {
+		secretName := req.GitSecretName
+		if secretName == "" {
+			secretName = "openclaw-" + req.Name + "-git-credentials"
+		}
+		if err := s.applyOpaqueSecret(ctx, identity, req.Namespace, secretName, map[string]string{
+			"username": req.GitUsername,
+			"password": req.GitPassword,
+		}, map[string]string{
+			managedByLabel: managedByValue,
+			instanceLabel:  req.Name,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *server) ensureProject(ctx context.Context, identity userIdentity, namespace string) error {
@@ -222,7 +267,17 @@ func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provi
 	if err != nil {
 		return err
 	}
-	credentials = upsertProvisionCredential(credentials, req)
+	existingAuth, existingWebSearch, err := s.currentClawTopLevelMaps(ctx, identity, req.Namespace, req.Name)
+	if err != nil {
+		return err
+	}
+	if req.APIKey != "" || req.SecretName != "" {
+		credentials = upsertProvisionCredential(credentials, req)
+	}
+	credentials, auth, webSearch, err := applyIntegrationsToSpec(credentials, req)
+	if err != nil {
+		return err
+	}
 	if req.AgentName != "" {
 		rawConfig = applyAgentConfig(rawConfig, req.AgentName, req.Model)
 	}
@@ -240,6 +295,16 @@ func (s *server) applyClaw(ctx context.Context, identity userIdentity, req provi
 	}
 	if len(agentFiles) > 0 {
 		spec["agentFiles"] = agentFiles
+	}
+	if len(auth) > 0 {
+		spec["auth"] = auth
+	} else if len(existingAuth) > 0 && !isDeployerManagedAuth(req.Name, existingAuth) {
+		spec["auth"] = existingAuth
+	}
+	if len(webSearch) > 0 {
+		spec["webSearch"] = webSearch
+	} else if len(existingWebSearch) > 0 && !isDeployerManagedWebSearch(req.Name, existingWebSearch) {
+		spec["webSearch"] = existingWebSearch
 	}
 
 	body := map[string]any{
@@ -270,6 +335,13 @@ func agentFilesSpec(req provisionRequest) map[string]any {
 		}
 		if req.GitPath != "" {
 			git["path"] = req.GitPath
+		}
+		if req.GitSecretName != "" || req.GitUsername != "" || req.GitPassword != "" {
+			name := req.GitSecretName
+			if name == "" {
+				name = "openclaw-" + req.Name + "-git-credentials"
+			}
+			git["secretRef"] = map[string]any{"name": name}
 		}
 		return map[string]any{"git": git}
 	case "configmap":
@@ -306,6 +378,21 @@ func (s *server) currentClawSpec(ctx context.Context, identity userIdentity, nam
 	return credentials, cloneMap(raw), cloneMap(agentFiles), nil
 }
 
+func (s *server) currentClawTopLevelMaps(ctx context.Context, identity userIdentity, namespace, name string) (map[string]any, map[string]any, error) {
+	var claw map[string]any
+	err := s.kubeJSON(ctx, identity, http.MethodGet, apiPath("apis/claw.sandbox.redhat.com/v1alpha1/namespaces", namespace, "claws", name), nil, &claw)
+	if err != nil {
+		var apiErr apiError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	auth, _, _ := nestedMap(claw, "spec", "auth")
+	webSearch, _, _ := nestedMap(claw, "spec", "webSearch")
+	return cloneMap(auth), cloneMap(webSearch), nil
+}
+
 func upsertCredential(credentials []any, instanceName, provider string) []any {
 	return upsertProvisionCredential(credentials, provisionRequest{Name: instanceName, Provider: provider})
 }
@@ -339,7 +426,7 @@ func providerCredentialForRequest(req provisionRequest) map[string]any {
 		"name":     option.CredentialName,
 		"provider": option.CredentialProvider,
 		"secretRef": []map[string]string{
-			{"name": secretNameForRequest(req), "key": option.SecretKey},
+			{"name": credentialSecretName(req), "key": credentialSecretKey(req)},
 		},
 	}
 	if option.CredentialType != "" {
@@ -352,6 +439,409 @@ func providerCredentialForRequest(req provisionRequest) map[string]any {
 		}
 	}
 	return credential
+}
+
+type secretToApply struct {
+	name string
+	data map[string]string
+}
+
+func defaultIntegrationName(kind string) string {
+	switch kind {
+	case "channel-telegram":
+		return "telegram"
+	case "channel-discord":
+		return "discord"
+	case "channel-slack":
+		return "slack"
+	case "channel-whatsapp":
+		return "whatsapp"
+	case "github-pat":
+		return "github"
+	case "websearch-brave":
+		return "brave-search"
+	case "websearch-tavily":
+		return "tavily-search"
+	case "auth-password":
+		return "gateway-password"
+	case "custom-credential":
+		return "custom"
+	default:
+		return strings.TrimPrefix(kind, "channel-")
+	}
+}
+
+func integrationSecretName(instanceName string, integration integrationRequest) string {
+	if integration.SecretName != "" {
+		return integration.SecretName
+	}
+	name := integration.Name
+	if name == "" {
+		name = defaultIntegrationName(integration.Kind)
+	}
+	switch integration.Kind {
+	case "channel-telegram":
+		return "openclaw-" + instanceName + "-telegram-bot-token"
+	case "channel-discord":
+		return "openclaw-" + instanceName + "-discord-bot-token"
+	case "channel-slack":
+		return "openclaw-" + instanceName + "-slack-tokens"
+	case "github-pat":
+		return "openclaw-" + instanceName + "-github-pat"
+	case "websearch-brave":
+		return "openclaw-" + instanceName + "-brave-search-api-key"
+	case "websearch-tavily":
+		return "openclaw-" + instanceName + "-tavily-search-api-key"
+	case "auth-password":
+		return "openclaw-" + instanceName + "-gateway-password"
+	default:
+		return "openclaw-" + instanceName + "-" + name
+	}
+}
+
+func integrationSecretKey(integration integrationRequest) string {
+	if integration.SecretKey != "" {
+		return integration.SecretKey
+	}
+	switch integration.Kind {
+	case "channel-telegram", "channel-discord", "channel-slack":
+		return "bot-token"
+	case "github-pat":
+		return "token"
+	case "auth-password":
+		return "password"
+	default:
+		return "api-key"
+	}
+}
+
+func integrationAppSecretName(instanceName string, integration integrationRequest) string {
+	if integration.AppSecretName != "" {
+		return integration.AppSecretName
+	}
+	return integrationSecretName(instanceName, integration)
+}
+
+func integrationAppSecretKey(integration integrationRequest) string {
+	if integration.AppSecretKey != "" {
+		return integration.AppSecretKey
+	}
+	return "app-token"
+}
+
+func integrationSecrets(instanceName string, integration integrationRequest) []secretToApply {
+	var secrets []secretToApply
+	if integration.SecretValue != "" {
+		secrets = append(secrets, secretToApply{
+			name: integrationSecretName(instanceName, integration),
+			data: map[string]string{
+				integrationSecretKey(integration): integration.SecretValue,
+			},
+		})
+	}
+	if integration.AppSecretValue != "" {
+		appName := integrationAppSecretName(instanceName, integration)
+		appKey := integrationAppSecretKey(integration)
+		for i := range secrets {
+			if secrets[i].name == appName {
+				secrets[i].data[appKey] = integration.AppSecretValue
+				return secrets
+			}
+		}
+		secrets = append(secrets, secretToApply{
+			name: appName,
+			data: map[string]string{appKey: integration.AppSecretValue},
+		})
+	}
+	return secrets
+}
+
+func applyIntegrationsToSpec(credentials []any, req provisionRequest) ([]any, map[string]any, map[string]any, error) {
+	var auth map[string]any
+	var webSearch map[string]any
+	credentials = pruneRemovedDeployerCredentials(credentials, req)
+	for _, integration := range req.Integrations {
+		switch integration.Kind {
+		case "channel-telegram", "channel-discord", "channel-slack", "channel-whatsapp":
+			credential, err := channelCredential(req.Name, integration)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			credentials = upsertCredentialMap(credentials, credential)
+		case "github-pat":
+			credentials = upsertCredentialMap(credentials, githubCredential(req.Name, integration))
+		case "custom-credential":
+			credential, err := customCredential(req.Name, integration)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			credentials = upsertCredentialMap(credentials, credential)
+		case "websearch-brave", "websearch-tavily", "websearch-duckduckgo", "websearch-gemini":
+			webSearch = webSearchSpec(req.Name, integration)
+		case "auth-password":
+			auth = map[string]any{
+				"mode": "password",
+				"passwordSecretRef": map[string]any{
+					"name": integrationSecretName(req.Name, integration),
+					"key":  integrationSecretKey(integration),
+				},
+			}
+		case "":
+			continue
+		default:
+			return nil, nil, nil, fmt.Errorf("unsupported integration kind %q", integration.Kind)
+		}
+	}
+	return credentials, auth, webSearch, nil
+}
+
+func pruneRemovedDeployerCredentials(credentials []any, req provisionRequest) []any {
+	submitted := submittedCredentialNames(req.Integrations)
+	next := make([]any, 0, len(credentials))
+	for _, credential := range credentials {
+		credentialMap, ok := credential.(map[string]any)
+		if !ok {
+			next = append(next, credential)
+			continue
+		}
+		if isRemovedDeployerCredential(req.Name, credentialMap, submitted) {
+			continue
+		}
+		next = append(next, credentialMap)
+	}
+	return next
+}
+
+func submittedCredentialNames(integrations []integrationRequest) map[string]bool {
+	names := map[string]bool{}
+	for _, integration := range integrations {
+		switch integration.Kind {
+		case "channel-telegram", "channel-discord", "channel-slack", "channel-whatsapp", "github-pat":
+			name := integration.Name
+			if name == "" {
+				name = defaultIntegrationName(integration.Kind)
+			}
+			names[name] = true
+		case "custom-credential":
+			if integration.Name != "" {
+				names[integration.Name] = true
+			}
+		}
+	}
+	return names
+}
+
+func isRemovedDeployerCredential(instanceName string, credential map[string]any, submitted map[string]bool) bool {
+	name, _ := credential["name"].(string)
+	if name == "" || submitted[name] {
+		return false
+	}
+	channel, _ := credential["channel"].(string)
+	if isDefaultDeployerChannelCredential(name, channel) {
+		return true
+	}
+	if isDefaultDeployerGitHubCredential(name, credential) {
+		return true
+	}
+	return hasSecretRefName(credential, "openclaw-"+instanceName+"-"+name)
+}
+
+func isDefaultDeployerChannelCredential(name, channel string) bool {
+	switch channel {
+	case "telegram", "discord", "slack", "whatsapp":
+		return name == defaultIntegrationName("channel-"+channel)
+	default:
+		return false
+	}
+}
+
+func isDefaultDeployerGitHubCredential(name string, credential map[string]any) bool {
+	if name != defaultIntegrationName("github-pat") {
+		return false
+	}
+	credentialType, _ := credential["type"].(string)
+	domain, _ := credential["domain"].(string)
+	return credentialType == "bearer" && domain == "api.github.com"
+}
+
+func hasSecretRefName(credential map[string]any, secretName string) bool {
+	secretRefs, _, _ := nestedSlice(credential, "secretRef")
+	for _, ref := range secretRefs {
+		refMap, ok := ref.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := refMap["name"].(string)
+		if name == secretName {
+			return true
+		}
+	}
+	return false
+}
+
+func isDeployerManagedAuth(instanceName string, auth map[string]any) bool {
+	mode, _ := auth["mode"].(string)
+	if mode != "password" {
+		return false
+	}
+	secretName, _, _ := nestedString(auth, "passwordSecretRef", "name")
+	return secretName == integrationSecretName(instanceName, integrationRequest{Kind: "auth-password"})
+}
+
+func isDeployerManagedWebSearch(instanceName string, webSearch map[string]any) bool {
+	provider, _ := webSearch["provider"].(string)
+	switch provider {
+	case "brave", "tavily":
+		secretName, _, _ := nestedString(webSearch, "secretRef", "name")
+		return secretName == integrationSecretName(instanceName, integrationRequest{Kind: "websearch-" + provider})
+	default:
+		return false
+	}
+}
+
+func githubCredential(instanceName string, integration integrationRequest) map[string]any {
+	name := integration.Name
+	if name == "" {
+		name = defaultIntegrationName(integration.Kind)
+	}
+	return map[string]any{
+		"name":   name,
+		"type":   "bearer",
+		"domain": "api.github.com",
+		"secretRef": []map[string]string{{
+			"name": integrationSecretName(instanceName, integration),
+			"key":  integrationSecretKey(integration),
+		}},
+	}
+}
+
+func channelCredential(instanceName string, integration integrationRequest) (map[string]any, error) {
+	channel := strings.TrimPrefix(integration.Kind, "channel-")
+	name := integration.Name
+	if name == "" {
+		name = channel
+	}
+	credential := map[string]any{
+		"name":    name,
+		"channel": channel,
+	}
+	if channel != "whatsapp" {
+		refs := []map[string]string{{
+			"name": integrationSecretName(instanceName, integration),
+			"key":  integrationSecretKey(integration),
+		}}
+		if channel == "slack" {
+			refs[0]["role"] = "botToken"
+			refs = append(refs, map[string]string{
+				"name": integrationAppSecretName(instanceName, integration),
+				"key":  integrationAppSecretKey(integration),
+				"role": "appToken",
+			})
+		}
+		credential["secretRef"] = refs
+	}
+	if integration.ChannelConfig != "" {
+		var config map[string]any
+		if err := json.Unmarshal([]byte(integration.ChannelConfig), &config); err != nil {
+			return nil, fmt.Errorf("integration %q channelConfig is invalid JSON: %w", name, err)
+		}
+		credential["channelConfig"] = config
+	}
+	return credential, nil
+}
+
+func customCredential(instanceName string, integration integrationRequest) (map[string]any, error) {
+	name := integration.Name
+	if name == "" {
+		return nil, errors.New("custom credential name is required")
+	}
+	credential := map[string]any{"name": name}
+	if integration.CredentialType != "" {
+		credential["type"] = integration.CredentialType
+	}
+	if integration.Provider != "" {
+		credential["provider"] = integration.Provider
+	}
+	if integration.Domain != "" {
+		credential["domain"] = integration.Domain
+	}
+	if integration.SecretName != "" || integration.SecretValue != "" {
+		credential["secretRef"] = []map[string]string{{
+			"name": integrationSecretName(instanceName, integration),
+			"key":  integrationSecretKey(integration),
+		}}
+	}
+	if integration.Header != "" || integration.ValuePrefix != "" {
+		apiKey := map[string]string{}
+		if integration.Header != "" {
+			apiKey["header"] = integration.Header
+		}
+		if integration.ValuePrefix != "" {
+			apiKey["valuePrefix"] = integration.ValuePrefix
+		}
+		credential["apiKey"] = apiKey
+	}
+	if integration.PathPrefix != "" {
+		credential["pathToken"] = map[string]string{"prefix": integration.PathPrefix}
+	}
+	if integration.GCPProject != "" || integration.GCPLocation != "" {
+		credential["gcp"] = map[string]string{"project": integration.GCPProject, "location": integration.GCPLocation}
+	}
+	if integration.OAuthClientID != "" || integration.OAuthTokenURL != "" || integration.OAuthScopes != "" {
+		oauth := map[string]any{"clientID": integration.OAuthClientID, "tokenURL": integration.OAuthTokenURL}
+		if integration.OAuthScopes != "" {
+			oauth["scopes"] = splitCSV(integration.OAuthScopes)
+		}
+		credential["oauth2"] = oauth
+	}
+	return credential, nil
+}
+
+func webSearchSpec(instanceName string, integration integrationRequest) map[string]any {
+	provider := strings.TrimPrefix(integration.Kind, "websearch-")
+	spec := map[string]any{"provider": provider}
+	if provider == "brave" || provider == "tavily" {
+		spec["secretRef"] = map[string]any{
+			"name": integrationSecretName(instanceName, integration),
+			"key":  integrationSecretKey(integration),
+		}
+	}
+	return spec
+}
+
+func upsertCredentialMap(credentials []any, credential map[string]any) []any {
+	name, _ := credential["name"].(string)
+	next := make([]any, 0, len(credentials)+1)
+	replaced := false
+	for _, existing := range credentials {
+		existingMap, ok := existing.(map[string]any)
+		if !ok {
+			continue
+		}
+		existingName, _ := existingMap["name"].(string)
+		if existingName == name {
+			next = append(next, credential)
+			replaced = true
+			continue
+		}
+		next = append(next, existingMap)
+	}
+	if !replaced {
+		next = append(next, credential)
+	}
+	return next
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func applyAgentConfig(raw map[string]any, agentName, model string) map[string]any {
@@ -454,6 +944,28 @@ func (s *server) deleteManagedSecret(ctx context.Context, identity userIdentity,
 	return s.delete(ctx, identity, secretPath)
 }
 
+func (s *server) managedSecretNames(ctx context.Context, identity userIdentity, namespace, name string) ([]string, error) {
+	selector := managedByLabel + "=" + managedByValue + "," + instanceLabel + "=" + name
+	path := apiPath("api/v1/namespaces", namespace, "secrets") + "?labelSelector=" + url.QueryEscape(selector)
+	var list map[string]any
+	if err := s.kubeJSON(ctx, identity, http.MethodGet, path, nil, &list); err != nil {
+		return nil, err
+	}
+	items, _, _ := nestedSlice(list, "items")
+	names := []string{}
+	for _, item := range items {
+		secret, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		secretName, _, _ := nestedString(secret, "metadata", "name")
+		if secretName != "" {
+			names = appendUnique(names, secretName)
+		}
+	}
+	return names, nil
+}
+
 func readyCondition(claw map[string]any) (bool, string, string) {
 	conditions, _, _ := nestedSlice(claw, "status", "conditions")
 	for _, item := range conditions {
@@ -485,6 +997,41 @@ func credentialProviders(claw map[string]any) []string {
 	return providers
 }
 
+func credentialRefs(claw map[string]any) []credentialRefResponse {
+	credentials, _, _ := nestedSlice(claw, "spec", "credentials")
+	refs := []credentialRefResponse{}
+	for _, credential := range credentials {
+		credentialMap, ok := credential.(map[string]any)
+		if !ok {
+			continue
+		}
+		provider, _ := credentialMap["provider"].(string)
+		if provider == "" {
+			continue
+		}
+		credentialName, _ := credentialMap["name"].(string)
+		secretRefs, _, _ := nestedSlice(credentialMap, "secretRef")
+		for _, ref := range secretRefs {
+			refMap, ok := ref.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := refMap["name"].(string)
+			key, _ := refMap["key"].(string)
+			if name == "" {
+				continue
+			}
+			refs = append(refs, credentialRefResponse{
+				Credential: credentialName,
+				Provider:   provider,
+				Name:       name,
+				Key:        key,
+			})
+		}
+	}
+	return refs
+}
+
 func credentialSecretNames(claw map[string]any) []string {
 	credentials, _, _ := nestedSlice(claw, "spec", "credentials")
 	secretNames := []string{}
@@ -503,6 +1050,16 @@ func credentialSecretNames(claw map[string]any) []string {
 			if name != "" {
 				secretNames = appendUnique(secretNames, name)
 			}
+		}
+	}
+	for _, fields := range [][]string{
+		{"spec", "webSearch", "secretRef", "name"},
+		{"spec", "auth", "passwordSecretRef", "name"},
+		{"spec", "agentFiles", "git", "secretRef", "name"},
+	} {
+		name, _, _ := nestedString(claw, fields...)
+		if name != "" {
+			secretNames = appendUnique(secretNames, name)
 		}
 	}
 	return secretNames

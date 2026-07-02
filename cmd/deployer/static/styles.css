@@ -12,6 +12,8 @@
   --page-bg: #f0f0f0;
   --surface: #ffffff;
   --surface-subtle: #f6f6f6;
+  --card-bg: #f8f8f8;
+  --card-border: #e2e2e2;
   --masthead-bg: #ffffff;
   --text: #151515;
   --text-subtle: #4d4d4d;
@@ -45,6 +47,8 @@
   --page-bg: #0f1214;
   --surface: #1b1d21;
   --surface-subtle: #15171a;
+  --card-bg: #1f2124;
+  --card-border: #383b3f;
   --masthead-bg: #1b1d21;
   --text: #e0e0e0;
   --text-subtle: #c2c5c9;
@@ -224,7 +228,7 @@ code {
 
 /* ---------- Page shell ---------- */
 .page {
-  max-width: 1200px;
+  max-width: 1380px;
   margin: 0 auto;
   padding: 26px 24px 64px;
 }
@@ -277,12 +281,12 @@ code {
 
 /* ---------- Card / form ---------- */
 .card {
-  flex: 1 1 540px;
+  flex: 1 1 760px;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: var(--surface);
-  border: 1px solid var(--border-subtle);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
   border-radius: 8px;
   box-shadow: var(--shadow-sm);
   overflow: hidden;
@@ -330,7 +334,7 @@ code {
 .section__title {
   margin: 0;
   font-family: "Red Hat Display", sans-serif;
-  font-size: 14.5px;
+  font-size: 15.5px;
   font-weight: 600;
   color: var(--text);
 }
@@ -348,7 +352,7 @@ code {
 }
 
 .section__body.cols {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
 .divider {
@@ -364,7 +368,7 @@ code {
 }
 
 .field > label {
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--text);
 }
@@ -378,22 +382,72 @@ code {
   color: var(--text-muted);
 }
 
+.credential-choice-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 14px;
+}
+
+.credential-choice {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.credential-choice > label,
+.credential-choice .cred-head label {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.credential-choice-or {
+  align-self: center;
+  justify-self: center;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+
+.secret-ref-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 1fr);
+  gap: 10px;
+}
+
+.secret-ref-grid label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .field input,
 .field select,
-.field textarea {
+.field textarea,
+.credential-choice input,
+.credential-choice textarea {
   width: 100%;
-  height: 38px;
+  height: 42px;
   padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--input-bg);
   color: var(--text);
   font-family: "Red Hat Text", sans-serif;
-  font-size: 14px;
+  font-size: 15px;
   outline: none;
 }
 
-.field textarea {
+.field textarea,
+.credential-choice textarea {
   height: auto;
   min-height: 118px;
   padding: 10px 12px;
@@ -405,13 +459,17 @@ code {
 
 .field input:focus,
 .field select:focus,
-.field textarea:focus {
+.field textarea:focus,
+.credential-choice input:focus,
+.credential-choice textarea:focus {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 22%, transparent);
 }
 
 .field input[aria-invalid="true"],
-.field textarea[aria-invalid="true"] {
+.field textarea[aria-invalid="true"],
+.credential-choice input[aria-invalid="true"],
+.credential-choice textarea[aria-invalid="true"] {
   border-color: var(--danger-border);
 }
 
@@ -425,7 +483,7 @@ code {
 
 .field__hint {
   margin: 0;
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.4;
   color: var(--text-muted);
 }
@@ -436,6 +494,25 @@ code {
   gap: 6px;
 }
 
+.or-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.or-divider::before,
+.or-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border-subtle);
+}
+
 .field__error {
   margin: 0;
   font-size: 12px;
@@ -443,7 +520,8 @@ code {
   color: var(--danger-border);
 }
 
-.field code {
+.field code,
+.credential-choice code {
   font-size: 11.5px;
   color: var(--text-subtle);
 }
@@ -455,7 +533,7 @@ code {
   padding: 14px;
   border: 1px dashed var(--border);
   border-radius: 8px;
-  background: var(--surface-subtle);
+  background: var(--surface);
 }
 
 .vertex-box {
@@ -497,6 +575,64 @@ code {
   font-size: 12px;
   font-weight: 600;
   color: var(--success);
+}
+
+.integration-builder {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.integration-builder .section__body {
+  padding: 14px;
+}
+
+.integration-builder__cols {
+  padding-bottom: 0 !important;
+}
+
+.integration-secret-fields {
+  padding-top: 10px !important;
+}
+
+.integration-actions {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0 14px 14px;
+}
+
+.integration-list {
+  display: grid;
+  gap: 8px;
+}
+
+.integration-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.integration-item__main {
+  min-width: 0;
+}
+
+.integration-item__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.integration-item__meta {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 /* ---------- Advanced (collapsible) section ---------- */
@@ -555,14 +691,14 @@ code {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  height: 40px;
+  height: 42px;
   padding: 0 18px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: transparent;
   color: var(--text);
   font-family: "Red Hat Text", sans-serif;
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -1116,5 +1252,13 @@ code {
 
   .footer .btn--manifest {
     margin-left: 0;
+  }
+
+  .secret-ref-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .credential-choice-grid {
+    grid-template-columns: 1fr;
   }
 }

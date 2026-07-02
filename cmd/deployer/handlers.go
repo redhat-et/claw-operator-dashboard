@@ -81,6 +81,21 @@ func (s *server) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
+func (s *server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
+	identity, err := currentIdentity(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	namespaces, err := s.visibleNamespaceNames(r.Context(), identity)
+	if err != nil {
+		writeError(w, statusCodeFor(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, namespacesResponse{Namespaces: namespaces})
+}
+
 func (s *server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	identity, err := currentIdentity(r)
 	if err != nil {
@@ -144,6 +159,8 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	req.Namespace = strings.TrimSpace(req.Namespace)
+	req.SecretName = strings.TrimSpace(req.SecretName)
+	req.SecretKey = strings.TrimSpace(req.SecretKey)
 	req.GCPProject = strings.TrimSpace(req.GCPProject)
 	req.GCPLocation = strings.TrimSpace(req.GCPLocation)
 	if err := validateNamespace(req.Namespace); err != nil {
@@ -160,19 +177,18 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := providers[req.Provider]
-	if strings.TrimSpace(req.APIKey) == "" {
-		if provider.RequiresGCP {
-			writeError(w, http.StatusBadRequest, "GCP service account JSON is required")
-		} else {
-			writeError(w, http.StatusBadRequest, "API key is required")
+	req.APIKey = strings.TrimSpace(req.APIKey)
+	if req.SecretName != "" {
+		if err := validateResourceName(req.SecretName, "Secret name"); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		return
 	}
 	if provider.RequiresGCP && (req.GCPProject == "" || req.GCPLocation == "") {
 		writeError(w, http.StatusBadRequest, "GCP project and location are required")
 		return
 	}
-	if provider.RequiresGCP {
+	if provider.RequiresGCP && req.APIKey != "" {
 		if err := validateGCPServiceAccountJSON(req.APIKey); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -182,18 +198,48 @@ func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	req.GitURL = strings.TrimSpace(req.GitURL)
 	req.GitRef = strings.TrimSpace(req.GitRef)
 	req.GitPath = strings.TrimSpace(req.GitPath)
+	req.GitSecretName = strings.TrimSpace(req.GitSecretName)
+	req.GitUsername = strings.TrimSpace(req.GitUsername)
+	req.GitPassword = strings.TrimSpace(req.GitPassword)
 	req.ConfigMapName = strings.TrimSpace(req.ConfigMapName)
 	req.ConfigMapKey = strings.TrimSpace(req.ConfigMapKey)
+	normalizeIntegrations(req.Integrations)
 	if err := validateFilesystemSource(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if err := validateProvisionIntegrations(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hasCredentialInput := req.APIKey != "" || req.SecretName != ""
+	if !hasCredentialInput {
+		if _, err := s.getState(r.Context(), identity, req.Namespace, req.Name); err != nil {
+			var apiErr apiError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				if provider.RequiresGCP {
+					writeError(w, http.StatusBadRequest, "GCP service account JSON or Secret name is required")
+				} else {
+					writeError(w, http.StatusBadRequest, "API key or Secret name is required")
+				}
+				return
+			}
+			writeError(w, statusCodeFor(err), err.Error())
+			return
+		}
 	}
 	if err := s.ensureProject(r.Context(), identity, req.Namespace); err != nil {
 		writeError(w, statusCodeFor(err), "failed to create project: "+err.Error())
 		return
 	}
-	if err := s.applySecret(r.Context(), identity, req); err != nil {
-		writeError(w, statusCodeFor(err), "failed to create provider secret: "+err.Error())
+	if req.APIKey != "" {
+		if err := s.applySecret(r.Context(), identity, req); err != nil {
+			writeError(w, statusCodeFor(err), "failed to create provider secret: "+err.Error())
+			return
+		}
+	}
+	if err := s.applyIntegrationSecrets(r.Context(), identity, req); err != nil {
+		writeError(w, statusCodeFor(err), "failed to create integration secret: "+err.Error())
 		return
 	}
 	if err := s.applyClaw(r.Context(), identity, req); err != nil {
@@ -271,6 +317,11 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, provider := range providers {
 			secretNames = appendUnique(secretNames, secretName(name, provider))
+		}
+	}
+	if managedSecretNames, err := s.managedSecretNames(r.Context(), identity, namespace, name); err == nil {
+		for _, secretName := range managedSecretNames {
+			secretNames = appendUnique(secretNames, secretName)
 		}
 	}
 	for _, secretName := range secretNames {

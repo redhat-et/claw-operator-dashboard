@@ -218,6 +218,84 @@ func validateFilesystemSource(req *provisionRequest) error {
 	}
 }
 
+func normalizeIntegrations(integrations []integrationRequest) {
+	for i := range integrations {
+		integrations[i].Kind = strings.ToLower(strings.TrimSpace(integrations[i].Kind))
+		integrations[i].Name = strings.TrimSpace(integrations[i].Name)
+		integrations[i].SecretName = strings.TrimSpace(integrations[i].SecretName)
+		integrations[i].SecretKey = strings.TrimSpace(integrations[i].SecretKey)
+		integrations[i].SecretValue = strings.TrimSpace(integrations[i].SecretValue)
+		integrations[i].AppSecretName = strings.TrimSpace(integrations[i].AppSecretName)
+		integrations[i].AppSecretKey = strings.TrimSpace(integrations[i].AppSecretKey)
+		integrations[i].AppSecretValue = strings.TrimSpace(integrations[i].AppSecretValue)
+		integrations[i].CredentialType = strings.TrimSpace(integrations[i].CredentialType)
+		integrations[i].Provider = strings.TrimSpace(integrations[i].Provider)
+		integrations[i].Channel = strings.TrimSpace(integrations[i].Channel)
+		integrations[i].Domain = strings.TrimSpace(integrations[i].Domain)
+		integrations[i].Header = strings.TrimSpace(integrations[i].Header)
+		integrations[i].ValuePrefix = strings.TrimSpace(integrations[i].ValuePrefix)
+		integrations[i].PathPrefix = strings.TrimSpace(integrations[i].PathPrefix)
+		integrations[i].GCPProject = strings.TrimSpace(integrations[i].GCPProject)
+		integrations[i].GCPLocation = strings.TrimSpace(integrations[i].GCPLocation)
+		integrations[i].OAuthClientID = strings.TrimSpace(integrations[i].OAuthClientID)
+		integrations[i].OAuthTokenURL = strings.TrimSpace(integrations[i].OAuthTokenURL)
+		integrations[i].OAuthScopes = strings.TrimSpace(integrations[i].OAuthScopes)
+		integrations[i].ChannelConfig = strings.TrimSpace(integrations[i].ChannelConfig)
+	}
+}
+
+func validateProvisionIntegrations(req provisionRequest) error {
+	if req.GitSecretName != "" {
+		if err := validateResourceName(req.GitSecretName, "Git Secret name"); err != nil {
+			return err
+		}
+	}
+	if (req.GitUsername != "" || req.GitPassword != "") && (req.GitUsername == "" || req.GitPassword == "") {
+		return errors.New("git username and password are both required when creating a Git Secret")
+	}
+	for _, integration := range req.Integrations {
+		if integration.Kind == "" {
+			continue
+		}
+		if integration.Name != "" {
+			if err := validateResourceName(integration.Name, "integration name"); err != nil {
+				return err
+			}
+		}
+		if integration.SecretName != "" {
+			if err := validateResourceName(integration.SecretName, "Secret name"); err != nil {
+				return err
+			}
+		}
+		if integration.AppSecretName != "" {
+			if err := validateResourceName(integration.AppSecretName, "app Secret name"); err != nil {
+				return err
+			}
+		}
+		switch integration.Kind {
+		case "channel-telegram", "channel-discord", "github-pat", "websearch-brave", "websearch-tavily", "auth-password":
+			if integration.SecretName == "" && integration.SecretValue == "" {
+				return fmt.Errorf("%s requires a pasted value or existing Secret name", integration.Kind)
+			}
+		case "channel-slack":
+			if integration.SecretName == "" && integration.SecretValue == "" {
+				return errors.New("channel-slack requires a bot token value or existing Secret name")
+			}
+			if integration.AppSecretName == "" && integration.AppSecretValue == "" {
+				return errors.New("channel-slack requires an app token value or existing app Secret name")
+			}
+		case "channel-whatsapp", "websearch-duckduckgo", "websearch-gemini":
+		case "custom-credential":
+			if integration.Name == "" {
+				return errors.New("custom credential name is required")
+			}
+		default:
+			return fmt.Errorf("unsupported integration kind %q", integration.Kind)
+		}
+	}
+	return nil
+}
+
 func validateGitURL(raw string) error {
 	if raw == "" {
 		return errors.New("git URL is required")
@@ -278,6 +356,20 @@ func secretNameForRequest(req provisionRequest) string {
 		return "openclaw-" + req.Name + "-" + option.CredentialName + "-gcp"
 	}
 	return secretName(req.Name, option.CredentialName)
+}
+
+func credentialSecretName(req provisionRequest) string {
+	if req.SecretName != "" {
+		return req.SecretName
+	}
+	return secretNameForRequest(req)
+}
+
+func credentialSecretKey(req provisionRequest) string {
+	if req.SecretKey != "" {
+		return req.SecretKey
+	}
+	return providers[req.Provider].SecretKey
 }
 
 func agentNameFromClawName(name string) string {
