@@ -36,6 +36,7 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/me", s.handleMe)
+	mux.HandleFunc("GET /api/namespaces", s.handleNamespaces)
 	mux.HandleFunc("GET /api/claws", s.handleClaws)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/provision", s.handleProvision)

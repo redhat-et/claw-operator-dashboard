@@ -257,6 +257,139 @@ func TestHandleDeleteRemovesAllManagedProviderSecrets(t *testing.T) {
 	}
 }
 
+func TestCredentialSecretNamesIncludesTopLevelSecretRefs(t *testing.T) {
+	claw := map[string]any{
+		"spec": map[string]any{
+			"credentials": []any{
+				map[string]any{
+					"name":      "openai",
+					"secretRef": []any{map[string]any{"name": "provider-secret", "key": "api-key"}},
+				},
+			},
+			"webSearch": map[string]any{
+				"provider":  "brave",
+				"secretRef": map[string]any{"name": "brave-secret", "key": "api-key"},
+			},
+			"auth": map[string]any{
+				"mode":              "password",
+				"passwordSecretRef": map[string]any{"name": "password-secret", "key": "password"},
+			},
+			"agentFiles": map[string]any{
+				"git": map[string]any{
+					"url":       "https://example.com/repo.git",
+					"secretRef": map[string]any{"name": "git-secret"},
+				},
+			},
+		},
+	}
+
+	assert.ElementsMatch(t, []string{"provider-secret", "brave-secret", "password-secret", "git-secret"}, credentialSecretNames(claw))
+}
+
+func TestHandleDeleteRemovesLabeledManagedSecrets(t *testing.T) {
+	deleted := map[string]bool{}
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body := "{}"
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/instance") {
+				body = `{"metadata":{"name":"instance"},"spec":{}}`
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/secrets") {
+				assert.Equal(t, managedByLabel+"="+managedByValue+","+instanceLabel+"=instance", r.URL.Query().Get("labelSelector"))
+				body = `{"items":[{"metadata":{"name":"stale-telegram-secret"}}]}`
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/secrets/stale-telegram-secret") {
+				body = `{
+					"metadata": {
+						"labels": {
+							"app.kubernetes.io/managed-by": "openclaw-deployer",
+							"openclaw-deployer.redhat.com/instance": "instance"
+						}
+					}
+				}`
+			}
+			if r.Method == http.MethodDelete {
+				deleted[r.URL.Path] = true
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "service-account-token", client: client}
+	req := httptest.NewRequest(http.MethodDelete, "/api/claw?namespace=sallyom-claw&name=instance", nil)
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleDelete(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, deleted["/api/v1/namespaces/sallyom-claw/secrets/stale-telegram-secret"])
+}
+
+func TestHandleProvisionWithSecretNameSkipsSecretApply(t *testing.T) {
+	var applied map[string]any
+	secretTouched := false
+	clawApplied := false
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			statusCode := http.StatusOK
+			body := `{}`
+			if strings.Contains(r.URL.Path, "/secrets/") {
+				secretTouched = true
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/instance") && !clawApplied {
+				statusCode = http.StatusNotFound
+				body = `{"message":"not found"}`
+			}
+			if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/claws/instance") {
+				clawApplied = true
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/instance") && clawApplied {
+				body = `{
+					"metadata": {"namespace": "sallyom-claw", "name": "instance"},
+					"spec": {
+						"credentials": [{
+							"name": "openai",
+							"provider": "openai",
+							"secretRef": [{"name": "existing-openai-key", "key": "api-key"}]
+						}]
+					}
+				}`
+			}
+			return &http.Response{
+				StatusCode: statusCode,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	s := &server{
+		apiServer:   "https://kubernetes.example.test",
+		bearerToken: "service-account-token",
+		client:      client,
+	}
+	body := `{"namespace":"sallyom-claw","name":"instance","provider":"openai","secretName":"existing-openai-key","secretKey":"OPENAI_API_KEY"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/provision", strings.NewReader(body))
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleProvision(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.False(t, secretTouched)
+	credentials, _, _ := nestedSlice(applied, "spec", "credentials")
+	require.Len(t, credentials, 1)
+	first := credentials[0].(map[string]any)
+	secretRefs := first["secretRef"].([]any)
+	secretRef := secretRefs[0].(map[string]any)
+	assert.Equal(t, "existing-openai-key", secretRef["name"])
+	assert.Equal(t, "OPENAI_API_KEY", secretRef["key"])
+}
+
 func TestHandleDeleteUsesRequestedNamespace(t *testing.T) {
 	deleted := map[string]bool{}
 	client := &http.Client{
@@ -436,6 +569,45 @@ func TestHandleClawsFallsBackToVisibleOpenShiftProjects(t *testing.T) {
 	assert.Equal(t, "unmanaged", payload.Claws[1].Name)
 }
 
+func TestHandleNamespacesListsVisibleOpenShiftProjects(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/api/v1/namespaces":
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"forbidden"}`)),
+				}, nil
+			case "/apis/project.openshift.io/v1/projects":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"items":[{"metadata":{"name":"sallyom-claw"}},{"metadata":{"name":"somalley-dev"}}]}`)),
+				}, nil
+			default:
+				t.Fatalf("unexpected request path %s", r.URL.Path)
+				return nil, nil
+			}
+		}),
+	}
+	s := &server{
+		apiServer:   "https://kubernetes.example.test",
+		bearerToken: "service-account-token",
+		client:      client,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleNamespaces(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var payload namespacesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, []string{"sallyom-claw", "somalley-dev"}, payload.Namespaces)
+}
+
 func TestNormalizeModelRef(t *testing.T) {
 	tests := map[string]struct {
 		provider string
@@ -547,6 +719,45 @@ func TestStateFromClawDefaultsConfigManagementToOperator(t *testing.T) {
 	assert.Equal(t, "operator", state.Management)
 }
 
+func TestStateFromClawIncludesProviderCredentialRefs(t *testing.T) {
+	state := stateFromClaw(map[string]any{
+		"metadata": map[string]any{"name": "instance"},
+		"spec": map[string]any{
+			"credentials": []any{
+				map[string]any{
+					"name":     "openai",
+					"provider": "openai",
+					"secretRef": []any{
+						map[string]any{"name": "shared-provider-secret", "key": "openai_api_key"},
+					},
+				},
+				map[string]any{
+					"name":     "openrouter",
+					"provider": "openrouter",
+					"secretRef": []any{
+						map[string]any{"name": "shared-provider-secret", "key": "openrouter_api_key"},
+					},
+				},
+			},
+		},
+	})
+
+	require.Len(t, state.CredentialRefs, 2)
+	assert.Equal(t, credentialRefResponse{
+		Credential: "openai",
+		Provider:   "openai",
+		Name:       "shared-provider-secret",
+		Key:        "openai_api_key",
+	}, state.CredentialRefs[0])
+	assert.Equal(t, credentialRefResponse{
+		Credential: "openrouter",
+		Provider:   "openrouter",
+		Name:       "shared-provider-secret",
+		Key:        "openrouter_api_key",
+	}, state.CredentialRefs[1])
+	assert.Equal(t, []string{"shared-provider-secret"}, state.SecretNames)
+}
+
 func TestProviderCredentialForVertex(t *testing.T) {
 	req := provisionRequest{
 		Name:        "instance",
@@ -563,6 +774,54 @@ func TestProviderCredentialForVertex(t *testing.T) {
 	assert.Equal(t, "openclaw-instance-anthropic-vertex-gcp", secretRefs[0]["name"])
 	assert.Equal(t, gcpSecretKey, secretRefs[0]["key"])
 	assert.Equal(t, map[string]string{"project": "my-project", "location": "us-east5"}, credential["gcp"])
+}
+
+func TestProviderCredentialUsesProvidedSecretName(t *testing.T) {
+	req := provisionRequest{
+		Name:       "instance",
+		Provider:   "openai",
+		SecretName: "existing-openai-key",
+		SecretKey:  "OPENAI_API_KEY",
+	}
+	credential := providerCredentialForRequest(req)
+	secretRefs := credential["secretRef"].([]map[string]string)
+	require.Len(t, secretRefs, 1)
+	assert.Equal(t, "existing-openai-key", secretRefs[0]["name"])
+	assert.Equal(t, "OPENAI_API_KEY", secretRefs[0]["key"])
+}
+
+func TestApplySecretUsesProvidedSecretKey(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/secrets/existing-openai-key") {
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{
+		apiServer:   "https://kubernetes.example.test",
+		bearerToken: "service-account-token",
+		client:      client,
+	}
+	req := provisionRequest{
+		Namespace:  "sallyom-claw",
+		Name:       "instance",
+		Provider:   "openai",
+		APIKey:     "sk-test",
+		SecretName: "existing-openai-key",
+		SecretKey:  "OPENAI_API_KEY",
+	}
+
+	require.NoError(t, s.applySecret(context.Background(), userIdentity{}, req))
+	data := applied["data"].(map[string]any)
+	assert.Contains(t, data, "OPENAI_API_KEY")
+	assert.NotContains(t, data, apiKeySecretKey)
 }
 
 func TestValidateGCPServiceAccountJSON(t *testing.T) {
@@ -768,6 +1027,252 @@ func TestApplyClawPreservesExistingAgentFiles(t *testing.T) {
 	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
 	url, _, _ := nestedString(applied, "spec", "agentFiles", "git", "url")
 	assert.Equal(t, "https://example.com/repo.git", url)
+}
+
+func TestApplyClawPreservesCredentialsWithoutCredentialInput(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"metadata": {"name": "instance"},
+						"spec": {
+							"credentials": [{
+								"name": "openai",
+								"provider": "openai",
+								"secretRef": [{"name": "existing-openai-key", "key": "api-key"}]
+							}]
+						}
+					}`)),
+				}, nil
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	req := provisionRequest{Namespace: "sallyom-claw", Name: "instance", Provider: "openai", Management: "operator"}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	credentials, _, _ := nestedSlice(applied, "spec", "credentials")
+	require.Len(t, credentials, 1)
+	first := credentials[0].(map[string]any)
+	secretRefs := first["secretRef"].([]any)
+	secretRef := secretRefs[0].(map[string]any)
+	assert.Equal(t, "existing-openai-key", secretRef["name"])
+}
+
+func TestApplyClawAddsTelegramIntegration(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+				}, nil
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	req := provisionRequest{
+		Namespace:  "sallyom-claw",
+		Name:       "instance",
+		Provider:   "openai",
+		Management: "operator",
+		Integrations: []integrationRequest{{
+			Kind:       "channel-telegram",
+			SecretName: "telegram-secret",
+			SecretKey:  "token",
+		}},
+	}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	credentials, _, _ := nestedSlice(applied, "spec", "credentials")
+	require.Len(t, credentials, 1)
+	telegram := credentials[0].(map[string]any)
+	assert.Equal(t, "telegram", telegram["name"])
+	assert.Equal(t, "telegram", telegram["channel"])
+	refs := telegram["secretRef"].([]any)
+	require.Len(t, refs, 1)
+	ref := refs[0].(map[string]any)
+	assert.Equal(t, "telegram-secret", ref["name"])
+	assert.Equal(t, "token", ref["key"])
+}
+
+func TestIntegrationSecretKeyDefaultsSlackToBotToken(t *testing.T) {
+	assert.Equal(t, "bot-token", integrationSecretKey(integrationRequest{Kind: "channel-slack"}))
+	assert.Equal(t, "custom-key", integrationSecretKey(integrationRequest{Kind: "channel-slack", SecretKey: "custom-key"}))
+}
+
+func TestApplyIntegrationsAddsGitHubPATCredential(t *testing.T) {
+	credentials, _, _, err := applyIntegrationsToSpec(nil, provisionRequest{
+		Name: "instance",
+		Integrations: []integrationRequest{{
+			Kind:        "github-pat",
+			SecretValue: "ghp_secret",
+		}},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, credentials, 1)
+	github := credentials[0].(map[string]any)
+	assert.Equal(t, "github", github["name"])
+	assert.Equal(t, "bearer", github["type"])
+	assert.Equal(t, "api.github.com", github["domain"])
+	refs := github["secretRef"].([]map[string]string)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "openclaw-instance-github-pat", refs[0]["name"])
+	assert.Equal(t, "token", refs[0]["key"])
+}
+
+func TestApplyIntegrationsRemovesAbsentManagedCredentials(t *testing.T) {
+	credentials := []any{
+		map[string]any{
+			"name":      "telegram",
+			"channel":   "telegram",
+			"secretRef": []any{map[string]any{"name": "openclaw-instance-telegram-bot-token", "key": "bot-token"}},
+		},
+		map[string]any{
+			"name":      "custom-api",
+			"provider":  "custom",
+			"secretRef": []any{map[string]any{"name": "openclaw-instance-custom-api", "key": "api-key"}},
+		},
+		map[string]any{
+			"name":      "work-telegram",
+			"channel":   "telegram",
+			"secretRef": []any{map[string]any{"name": "team-owned-secret", "key": "bot-token"}},
+		},
+		map[string]any{
+			"name":     "openai",
+			"provider": "openai",
+		},
+	}
+
+	next, _, _, err := applyIntegrationsToSpec(credentials, provisionRequest{
+		Name: "instance",
+		Integrations: []integrationRequest{{
+			Kind:       "channel-slack",
+			SecretName: "slack-secret",
+		}},
+	})
+
+	require.NoError(t, err)
+	names := []string{}
+	for _, credential := range next {
+		credentialMap := credential.(map[string]any)
+		name, _ := credentialMap["name"].(string)
+		names = append(names, name)
+	}
+	assert.ElementsMatch(t, []string{"work-telegram", "openai", "slack"}, names)
+}
+
+func TestApplyClawRemovesAbsentManagedTopLevelIntegrations(t *testing.T) {
+	var applied map[string]any
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"metadata": {"name": "instance"},
+						"spec": {
+							"auth": {
+								"mode": "password",
+								"passwordSecretRef": {"name": "openclaw-instance-gateway-password", "key": "password"}
+							},
+							"webSearch": {
+								"provider": "brave",
+								"secretRef": {"name": "openclaw-instance-brave-search-api-key", "key": "api-key"}
+							}
+						}
+					}`)),
+				}, nil
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&applied))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	req := provisionRequest{Namespace: "sallyom-claw", Name: "instance", Provider: "openai", Management: "operator"}
+
+	require.NoError(t, s.applyClaw(context.Background(), userIdentity{}, req))
+	_, ok, _ := nestedMap(applied, "spec", "auth")
+	assert.False(t, ok)
+	_, ok, _ = nestedMap(applied, "spec", "webSearch")
+	assert.False(t, ok)
+}
+
+func TestHandleProvisionWithWebSearchIntegrationCreatesSecretAndSpec(t *testing.T) {
+	appliedSecrets := map[string]map[string]any{}
+	var appliedClaw map[string]any
+	clawApplied := false
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			statusCode := http.StatusOK
+			body := `{}`
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/instance") && !clawApplied {
+				statusCode = http.StatusNotFound
+				body = `{"message":"not found"}`
+			}
+			if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/secrets/") {
+				var secret map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&secret))
+				appliedSecrets[r.URL.Path] = secret
+			}
+			if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/claws/instance") {
+				clawApplied = true
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&appliedClaw))
+			}
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/claws/instance") && clawApplied {
+				body = `{"metadata":{"namespace":"sallyom-claw","name":"instance"},"spec":{"webSearch":{"provider":"brave","secretRef":{"name":"brave-secret","key":"api-key"}}}}`
+			}
+			return &http.Response{
+				StatusCode: statusCode,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	s := &server{apiServer: "https://kubernetes.example.test", bearerToken: "t", client: client}
+	body := `{
+		"namespace":"sallyom-claw",
+		"name":"instance",
+		"provider":"openai",
+		"secretName":"openai-secret",
+		"integrations":[{"kind":"websearch-brave","secretName":"brave-secret","secretKey":"api-key","secretValue":"brave-token"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/provision", strings.NewReader(body))
+	req.Header.Set("X-Forwarded-User", "sallyom")
+	rec := httptest.NewRecorder()
+
+	s.handleProvision(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, appliedSecrets, "/api/v1/namespaces/sallyom-claw/secrets/brave-secret")
+	provider, _, _ := nestedString(appliedClaw, "spec", "webSearch", "provider")
+	assert.Equal(t, "brave", provider)
+	secretName, _, _ := nestedString(appliedClaw, "spec", "webSearch", "secretRef", "name")
+	assert.Equal(t, "brave-secret", secretName)
 }
 
 func TestCleanArchivePath(t *testing.T) {
