@@ -1,0 +1,8 @@
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: distributed-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  type: DistributedTracing

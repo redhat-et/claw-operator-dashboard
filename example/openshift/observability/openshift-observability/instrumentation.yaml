@@ -1,0 +1,11 @@
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: ingest
+  namespace: openshift-observability
+spec:
+  exporter:
+    endpoint: http://ingest-collector.openshift-observability.svc.cluster.local:4317
+  propagators:
+    - tracecontext
+    - baggage

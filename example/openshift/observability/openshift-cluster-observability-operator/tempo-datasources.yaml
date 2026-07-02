@@ -1,0 +1,47 @@
+apiVersion: perses.dev/v1alpha2
+kind: PersesGlobalDatasource
+metadata:
+  name: tracing-dev-tenant
+spec:
+  config:
+    display:
+      name: tracing (dev tenant)
+    default: true
+    plugin:
+      kind: TempoDatasource
+      spec:
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: https://tempo-tracing-gateway.openshift-tracing.svc.cluster.local:8080/api/traces/v1/dev/tempo
+            secret: tracing-dev-tenant-secret
+  client:
+    tls:
+      enable: true
+      caCert:
+        type: file
+        certPath: /ca/service-ca.crt
+---
+apiVersion: perses.dev/v1alpha2
+kind: PersesGlobalDatasource
+metadata:
+  name: tracing-audit-tenant
+spec:
+  config:
+    display:
+      name: tracing (audit tenant)
+    default: false
+    plugin:
+      kind: TempoDatasource
+      spec:
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: https://tempo-tracing-gateway.openshift-tracing.svc.cluster.local:8080/api/traces/v1/audit/tempo
+            secret: tracing-audit-tenant-secret
+  client:
+    tls:
+      enable: true
+      caCert:
+        type: file
+        certPath: /ca/service-ca.crt
